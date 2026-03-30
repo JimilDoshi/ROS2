@@ -1,0 +1,4 @@
+int16  x      # throttle  -100 to 100
+int16  y      # steering  -100 to 100
+uint8  speed  # 0 to 100
+uint8  mode   # 0=eco 1=normal 2=sport
