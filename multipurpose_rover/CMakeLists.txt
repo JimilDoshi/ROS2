@@ -8,7 +8,7 @@ endif()
 # find dependencies
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
-find_package(geometry_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 # Generate custom message and service
@@ -18,17 +18,26 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ament_export_dependencies(rosidl_default_runtime)
 
-add_executable(cmd_vel_to_ecu src/cmd_vel_to_ecu.cpp)
-ament_target_dependencies(cmd_vel_to_ecu rclcpp geometry_msgs)
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 
-# rover_control_server
+# Enable service server
+add_executable(rover_enable_server src/rover_enable_server.cpp)
+ament_target_dependencies(rover_enable_server rclcpp std_msgs)
+target_link_libraries(rover_enable_server ${cpp_typesupport_target})
+
+# CAN driver — subscribes to topic and drives ECU
+add_executable(rover_can_driver src/rover_can_driver.cpp)
+ament_target_dependencies(rover_can_driver rclcpp std_msgs)
+target_link_libraries(rover_can_driver ${cpp_typesupport_target})
+
+# Old combined server (kept for reference)
 add_executable(rover_control_server src/rover_control_server.cpp)
 ament_target_dependencies(rover_control_server rclcpp)
-rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(rover_control_server ${cpp_typesupport_target})
 
 install(TARGETS
-  cmd_vel_to_ecu
+  rover_enable_server
+  rover_can_driver
   rover_control_server
   DESTINATION lib/${PROJECT_NAME}
 )
