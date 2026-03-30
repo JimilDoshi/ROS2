@@ -54,9 +54,9 @@ public:
             std::bind(&RoverCANDriver::enableCallback, this, std::placeholders::_1)
         );
 
-        // Send CAN frames at 50Hz
+        // Send CAN frames at 100Hz to match ECU control_task rate
         timer_ = this->create_wall_timer(
-            20ms, std::bind(&RoverCANDriver::timerCallback, this)
+            10ms, std::bind(&RoverCANDriver::timerCallback, this)
         );
 
         last_cmd_time_ = this->now();
@@ -91,15 +91,22 @@ private:
     void sendCANFrame() {
         if (can_fd_ < 0) return;
 
+        // Scale x by speed on Pi side, send speed=100 to ECU always
+        // This avoids torn reads on speed byte causing burst behavior
+        // ECU formula: throttle = (x/100) * speed * mode_scale
+        // We want: throttle = (x_scaled/100) * 100 * mode_scale
+        int16_t x_scaled = (int16_t)((x_ * speed_) / 100);
+        int16_t y_scaled = (int16_t)((y_ * speed_) / 100);
+
         struct can_frame frame{};
         frame.can_id  = CAN_ID_RECEIVER_DATA;
         frame.can_dlc = 8;
 
-        frame.data[0] = (y_ >> 8) & 0xFF;
-        frame.data[1] =  y_       & 0xFF;
-        frame.data[2] = (x_ >> 8) & 0xFF;
-        frame.data[3] =  x_       & 0xFF;
-        frame.data[4] = speed_;
+        frame.data[0] = (y_scaled >> 8) & 0xFF;
+        frame.data[1] =  y_scaled       & 0xFF;
+        frame.data[2] = (x_scaled >> 8) & 0xFF;
+        frame.data[3] =  x_scaled       & 0xFF;
+        frame.data[4] = 100;      // always 100 — speed already baked into x/y
         frame.data[5] = enable_;
         frame.data[6] = mode_;
         frame.data[7] = 0x00;
@@ -109,7 +116,7 @@ private:
 
     void cmdCallback(const RoverCmd::SharedPtr msg) {
         last_cmd_time_ = this->now();
-        x_     = msg->x;
+        x_     = -msg->x;   // negate to fix forward/reverse direction
         y_     = msg->y;
         speed_ = msg->speed;
         mode_  = msg->mode;
@@ -120,9 +127,9 @@ private:
     }
 
     void timerCallback() {
-        // Safety watchdog: no /rover_cmd for 500ms → force stop
+        // Safety watchdog: no /rover_cmd for 200ms → force stop
         double elapsed = (this->now() - last_cmd_time_).seconds();
-        if (elapsed > 0.5 && enable_ == 1) {
+        if (elapsed > 0.2 && enable_ == 1) {
             enable_ = 0;
             x_ = 0; y_ = 0;
             RCLCPP_WARN(this->get_logger(),
