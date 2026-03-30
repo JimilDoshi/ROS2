@@ -42,7 +42,7 @@ public:
     CmdVelToECU() : Node("cmd_vel_to_ecu"), can_fd_(-1) {
 
         // Constants matching ECU expectations
-        speed_  = 50;
+        speed_  = 100;
         enable_ = 1;
         mode_   = 1;   // 0=eco, 1=normal, 2=sport
 
@@ -56,14 +56,14 @@ public:
             std::bind(&CmdVelToECU::cmdVelCallback, this, std::placeholders::_1)
         );
 
-        // Watchdog: checks every 100ms if last msg > 0.5s ago
-        watchdog_timer_ = this->create_wall_timer(
-            100ms, std::bind(&CmdVelToECU::watchdogCallback, this)
+        // Continuously send CAN frames at 50Hz — keeps motors smooth
+        publish_timer_ = this->create_wall_timer(
+            20ms, std::bind(&CmdVelToECU::publishTimerCallback, this)
         );
 
         last_msg_time_ = this->now();
         RCLCPP_INFO(this->get_logger(),
-            "cmd_vel_to_ecu ready — sending CAN frames to %s @ 0x%X",
+            "cmd_vel_to_ecu ready — sending CAN frames to %s @ 0x%X at 50Hz",
             CAN_INTERFACE, CAN_ID_RECEIVER_DATA);
     }
 
@@ -134,27 +134,31 @@ private:
         x_ = scaleAndClamp(msg->linear.x,  MAX_LINEAR);   // throttle
         y_ = scaleAndClamp(msg->angular.z, MAX_ANGULAR);  // steering
 
-        sendCANFrame();
-
+        // Don't send here — the 50Hz timer handles sending continuously
         RCLCPP_INFO(this->get_logger(),
             "x(throttle)=%d  y(steering)=%d  speed=%d  enable=%d  mode=%d",
             x_, y_, speed_, enable_, mode_);
     }
 
-    void watchdogCallback() {
+    void publishTimerCallback() {
         double elapsed = (this->now() - last_msg_time_).seconds();
-        if (elapsed > 0.5 && enable_ == 1) {
+
+        // Watchdog: no cmd_vel for 0.5s → stop
+        if (elapsed > 0.5) {
+            if (enable_ == 1) {
+                RCLCPP_WARN(this->get_logger(),
+                    "STOP — no /cmd_vel for %.2fs  enable=0 sent to ECU", elapsed);
+            }
             enable_ = 0;
             x_ = 0;
             y_ = 0;
-            sendCANFrame();  // send stop frame to ECU
-            RCLCPP_WARN(this->get_logger(),
-                "STOP — no /cmd_vel for %.2fs  enable=0 sent to ECU", elapsed);
         }
+
+        sendCANFrame();
     }
 
     rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr subscription_;
-    rclcpp::TimerBase::SharedPtr watchdog_timer_;
+    rclcpp::TimerBase::SharedPtr publish_timer_;
     rclcpp::Time last_msg_time_;
 
     int can_fd_;
@@ -172,3 +176,4 @@ int main(int argc, char *argv[]) {
     rclcpp::shutdown();
     return 0;
 }
+
