@@ -1,0 +1,15 @@
+[Unit]
+Description=ROS2 Rover CAN Driver
+After=network.target rover_enable_server.service
+
+[Service]
+Type=simple
+User=camero
+Environment="HOME=/home/camero"
+ExecStartPre=/bin/sleep 6
+ExecStart=/bin/bash -c "source /opt/ros/jazzy/setup.bash && source /home/camero/ros2_ws/install/setup.bash && sudo ip link set can0 type can bitrate 500000 && sudo ip link set can0 up && ros2 run multipurpose_rover rover_can_driver"
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

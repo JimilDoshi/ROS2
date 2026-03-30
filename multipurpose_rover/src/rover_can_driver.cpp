@@ -41,8 +41,11 @@ public:
                 "Failed to open SocketCAN on %s", CAN_INTERFACE);
         }
 
+        // QoS: best effort, depth 1 — always use latest, never queue stale msgs
+        auto qos = rclcpp::QoS(1).best_effort();
+
         cmd_sub_ = this->create_subscription<RoverCmd>(
-            "rover_cmd", 10,
+            "rover_cmd", qos,
             std::bind(&RoverCANDriver::cmdCallback, this, std::placeholders::_1)
         );
 
