@@ -57,6 +57,7 @@ typedef struct {
 ControlData_t control = {0};
 AccelData_t accel = {0};
 SemaphoreHandle_t accelMutex;
+SemaphoreHandle_t controlMutex;   // ← protects control struct
 uint32_t last_rx_time = 0;
 Adafruit_ADXL345_Unified adxl(12345);
 uint8_t faultStatus = 0;
@@ -106,11 +107,15 @@ void can_rx_task(void *arg) {
   while(1) {
     if(twai_receive(&rx, pdMS_TO_TICKS(100)) == ESP_OK) {
       if(rx.identifier == CAN_ID_RECEIVER_DATA && rx.data_length_code == 8) {
-        control.y = (int16_t)((rx.data[0]<<8)|rx.data[1]);
-        control.x = (int16_t)((rx.data[2]<<8)|rx.data[3]);
-        control.speed = rx.data[4];
-        control.enable = rx.data[5];
-        control.mode = rx.data[6];
+        // Take mutex before writing — prevents torn reads in control_task
+        if(xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+          control.y      = (int16_t)((rx.data[0]<<8)|rx.data[1]);
+          control.x      = (int16_t)((rx.data[2]<<8)|rx.data[3]);
+          control.speed  = rx.data[4];
+          control.enable = rx.data[5];
+          control.mode   = rx.data[6];
+          xSemaphoreGive(controlMutex);
+        }
         last_rx_time = millis();
         faultStatus &= ~(1 << FAULT_CAN_RX_TIMEOUT);
       }
@@ -126,37 +131,50 @@ void can_rx_task(void *arg) {
 void control_task(void *arg) {
   while(1) {
     if(millis() - last_rx_time > 500) {
-      control.enable = 0;
+      if(xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        control.enable = 0;
+        xSemaphoreGive(controlMutex);
+      }
       faultStatus |= (1 << FAULT_CAN_RX_TIMEOUT);
     }
 
-    if(!control.enable) {
+    // Take a local snapshot of control — hold mutex as briefly as possible
+    ControlData_t local;
+    if(xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+      local = control;
+      xSemaphoreGive(controlMutex);
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    if(!local.enable) {
       for(int i=1; i<=4; i++) set_motor(i, 0, 0);
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
-    float mode_scale = (control.mode==0) ? 0.3f : (control.mode==1) ? 0.6f : 1.0f;
-    float throttle = (control.x / 100.0f) * control.speed * mode_scale;
-    float turn = -(control.y / 100.0f) * control.speed * mode_scale;
+    float mode_scale = (local.mode==0) ? 0.3f : (local.mode==1) ? 0.6f : 1.0f;
+    float throttle = (local.x / 100.0f) * local.speed * mode_scale;
+    float turn = -(local.y / 100.0f) * local.speed * mode_scale;
 
-    int16_t left = (int16_t)constrain(throttle + turn, -100, 100);
+    int16_t left  = (int16_t)constrain(throttle + turn, -100, 100);
     int16_t right = (int16_t)constrain(throttle - turn, -100, 100);
 
-    left = (int16_t)((left / 100.0f) * MAX_PWM);
+    left  = (int16_t)((left  / 100.0f) * MAX_PWM);
     right = (int16_t)((right / 100.0f) * MAX_PWM);
 
-    if(left > 0) left = (left < MIN_PWM) ? MIN_PWM : left;
-    if(left < 0) left = (left > -MIN_PWM) ? -MIN_PWM : left;
+    if(left  > 0) left  = (left  < MIN_PWM) ? MIN_PWM : left;
+    if(left  < 0) left  = (left  > -MIN_PWM) ? -MIN_PWM : left;
     if(right > 0) right = (right < MIN_PWM) ? MIN_PWM : right;
     if(right < 0) right = (right > -MIN_PWM) ? -MIN_PWM : right;
 
-    if(abs(left) < 10) left = 0;
+    if(abs(left)  < 10) left  = 0;
     if(abs(right) < 10) right = 0;
 
-    set_motor(1, left>=0?1:-1, abs(left));
+    set_motor(1, left>=0?1:-1,  abs(left));
     set_motor(4, right>=0?1:-1, abs(right));
-    set_motor(2, left>=0?-1:1, abs(left));
+    set_motor(2, left>=0?-1:1,  abs(left));
     set_motor(3, right>=0?-1:1, abs(right));
 
     vTaskDelay(pdMS_TO_TICKS(10));
@@ -200,7 +218,14 @@ void can_tx_task(void *arg) {
       tx_data[0] = ax>>8; tx_data[1] = ax;
       tx_data[2] = ay>>8; tx_data[3] = ay;
       tx_data[4] = az>>8; tx_data[5] = az;
-      tx_data[6] = control.speed;
+
+      // Read speed safely
+      uint8_t spd = 0;
+      if(xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
+        spd = control.speed;
+        xSemaphoreGive(controlMutex);
+      }
+      tx_data[6] = spd;
       tx_data[7] = faultStatus;
 
       can_send(CAN_ID_FEEDBACK, tx_data);
@@ -230,13 +255,14 @@ void setup() {
     faultStatus |= (1 << FAULT_ADXL_ERROR);
   }
 
-  accelMutex = xSemaphoreCreateMutex();
+  accelMutex   = xSemaphoreCreateMutex();
+  controlMutex = xSemaphoreCreateMutex();   // ← create control mutex
 
-  xTaskCreatePinnedToCore(can_rx_task, "rx", 2048, NULL, 3, NULL, 0);
+  xTaskCreatePinnedToCore(can_rx_task,  "rx",   2048, NULL, 3, NULL, 0);
   xTaskCreatePinnedToCore(control_task, "ctrl", 2048, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(accel_task, "acl", 2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(can_tx_task, "tx", 2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(fault_tx_task, "flt", 1024, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(accel_task,   "acl",  2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(can_tx_task,  "tx",   2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(fault_tx_task,"flt",  1024, NULL, 1, NULL, 0);
 }
 
 void loop() {
