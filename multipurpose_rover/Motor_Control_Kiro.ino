@@ -311,6 +311,8 @@ void encoder_tx_task(void *arg) {
     int32_t m1 = get_encoder(PCNT_M1, enc_m1);
     int32_t m4 = get_encoder(PCNT_M4, enc_m4);
 
+    Serial.printf("[ENC] M1=%d  M4=%d\n", m1, m4);
+
     uint8_t tx_data[8];
     tx_data[0] = (m1 >> 24) & 0xFF;
     tx_data[1] = (m1 >> 16) & 0xFF;
