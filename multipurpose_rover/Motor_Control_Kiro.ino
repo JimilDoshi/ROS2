@@ -108,7 +108,7 @@ void pcnt_init_encoder(pcnt_unit_t unit, int pulse_pin, int ctrl_pin) {
   pcnt_counter_clear(unit);
   pcnt_event_enable(unit, PCNT_EVT_H_LIM);
   pcnt_event_enable(unit, PCNT_EVT_L_LIM);
-  pcnt_intr_enable(unit);
+  // Note: pcnt_intr_enable called after pcnt_isr_register in setup
   pcnt_counter_resume(unit);
 }
 
@@ -348,20 +348,15 @@ void setup() {
   }
 
   Serial.println("[BOOT] Init PCNT...");
-  pcnt_isr_service_install(0);
-  Serial.println("[BOOT] PCNT ISR service installed");
-
-  pcnt_isr_handler_add(PCNT_M1, pcnt_isr, NULL);
-  Serial.println("[BOOT] PCNT M1 ISR handler added");
-
-  pcnt_isr_handler_add(PCNT_M4, pcnt_isr, NULL);
-  Serial.println("[BOOT] PCNT M4 ISR handler added");
-
   pcnt_init_encoder(PCNT_M1, M1_ENA, M1_ENB);
   Serial.println("[BOOT] PCNT M1 encoder init OK");
-
   pcnt_init_encoder(PCNT_M4, M4_ENA, M4_ENB);
   Serial.println("[BOOT] PCNT M4 encoder init OK");
+  // Register single ISR for both units after both are configured
+  pcnt_isr_register(pcnt_isr, NULL, 0, NULL);
+  pcnt_intr_enable(PCNT_M1);
+  pcnt_intr_enable(PCNT_M4);
+  Serial.println("[BOOT] PCNT ISR registered");
 
   accelMutex   = xSemaphoreCreateMutex();
   controlMutex = xSemaphoreCreateMutex();
