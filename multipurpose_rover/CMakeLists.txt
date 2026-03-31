@@ -9,6 +9,10 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
 # Generate custom message and service
@@ -30,6 +34,14 @@ add_executable(rover_can_driver src/rover_can_driver.cpp)
 ament_target_dependencies(rover_can_driver rclcpp std_msgs)
 target_link_libraries(rover_can_driver ${cpp_typesupport_target})
 
+# CAN receiver — reads raw CAN frames and publishes encoder data
+add_executable(rover_can_receiver src/rover_can_receiver.cpp)
+ament_target_dependencies(rover_can_receiver rclcpp std_msgs)
+
+# Odometry — computes and publishes /odom and /tf from encoder data
+add_executable(rover_odom src/rover_odom.cpp)
+ament_target_dependencies(rover_odom rclcpp std_msgs nav_msgs geometry_msgs tf2 tf2_ros)
+
 # Old combined server (kept for reference)
 add_executable(rover_control_server src/rover_control_server.cpp)
 ament_target_dependencies(rover_control_server rclcpp)
@@ -38,6 +50,8 @@ target_link_libraries(rover_control_server ${cpp_typesupport_target})
 install(TARGETS
   rover_enable_server
   rover_can_driver
+  rover_can_receiver
+  rover_odom
   rover_control_server
   DESTINATION lib/${PROJECT_NAME}
 )

@@ -10,6 +10,7 @@
 #include <freertos/semphr.h>
 #include <Adafruit_ADXL345_U.h>
 #include "driver/twai.h"
+#include "driver/pcnt.h"
 
 /* ================= MOTOR PINS ================= */
 #define MOTOR1_RPWM 26
@@ -27,12 +28,22 @@
 #define MAX_PWM  255
 #define MIN_PWM  30
 
+/* ================= ENCODER PINS ================= */
+#define M1_ENA 34   // rear right — PCNT pulse
+#define M1_ENB 35   // rear right — PCNT control (direction)
+#define M4_ENA 36   // rear left  — PCNT pulse
+#define M4_ENB 39   // rear left  — PCNT control (direction)
+
+#define PCNT_M1 PCNT_UNIT_0
+#define PCNT_M4 PCNT_UNIT_1
+
 /* ================= CAN ================= */
 #define CAN_TX GPIO_NUM_5
 #define CAN_RX GPIO_NUM_4
 
 #define CAN_ID_RECEIVER_DATA 0x101
 #define CAN_ID_FEEDBACK      0x200
+#define CAN_ID_ENCODER       0x201   // encoder tick counts
 #define CAN_ID_FAULT         0x300
 
 /* ================= FAULT FLAGS ================= */
@@ -61,6 +72,51 @@ SemaphoreHandle_t controlMutex;   // ← protects control struct
 uint32_t last_rx_time = 0;
 Adafruit_ADXL345_Unified adxl(12345);
 uint8_t faultStatus = 0;
+
+/* ================= ENCODER GLOBALS ================= */
+volatile int32_t enc_m1 = 0;   // M1 accumulated count — rear right
+volatile int32_t enc_m4 = 0;   // M4 accumulated count — rear left
+
+// PCNT overflows at ±32767 — accumulate into int32
+static void IRAM_ATTR pcnt_isr(void *arg) {
+  uint32_t status;
+  pcnt_get_event_status(PCNT_M1, &status);
+  if (status & PCNT_EVT_H_LIM) enc_m1 += 32767;
+  if (status & PCNT_EVT_L_LIM) enc_m1 -= 32767;
+
+  pcnt_get_event_status(PCNT_M4, &status);
+  if (status & PCNT_EVT_H_LIM) enc_m4 += 32767;
+  if (status & PCNT_EVT_L_LIM) enc_m4 -= 32767;
+}
+
+void pcnt_init_encoder(pcnt_unit_t unit, int pulse_pin, int ctrl_pin) {
+  pcnt_config_t cfg = {
+    .pulse_gpio_num  = pulse_pin,
+    .ctrl_gpio_num   = ctrl_pin,
+    .lctrl_mode      = PCNT_MODE_REVERSE,  // ctrl LOW  → count down
+    .hctrl_mode      = PCNT_MODE_KEEP,     // ctrl HIGH → count up
+    .pos_mode        = PCNT_COUNT_INC,     // rising edge → increment
+    .neg_mode        = PCNT_COUNT_DIS,     // falling edge → ignore
+    .counter_h_lim   =  32767,
+    .counter_l_lim   = -32767,
+    .unit            = unit,
+    .channel         = PCNT_CHANNEL_0,
+  };
+  pcnt_unit_config(&cfg);
+  pcnt_counter_pause(unit);
+  pcnt_counter_clear(unit);
+  pcnt_event_enable(unit, PCNT_EVT_H_LIM);
+  pcnt_event_enable(unit, PCNT_EVT_L_LIM);
+  pcnt_isr_register(pcnt_isr, NULL, 0, NULL);
+  pcnt_intr_enable(unit);
+  pcnt_counter_resume(unit);
+}
+
+int32_t get_encoder(pcnt_unit_t unit, volatile int32_t &accum) {
+  int16_t count = 0;
+  pcnt_get_counter_value(unit, &count);
+  return accum + count;
+}
 
 /* ================= MOTOR FUNCTIONS ================= */
 void motor_init() {
@@ -245,6 +301,31 @@ void fault_tx_task(void *arg) {
   }
 }
 
+/* ================= ENCODER TX TASK ================= */
+// Sends M1 and M4 tick counts over CAN ID 0x201 at 20Hz
+// Frame layout (8 bytes):
+//   byte[0..3] = enc_m1 (rear right, int32_t big-endian)
+//   byte[4..7] = enc_m4 (rear left,  int32_t big-endian)
+void encoder_tx_task(void *arg) {
+  while(1) {
+    int32_t m1 = get_encoder(PCNT_M1, enc_m1);
+    int32_t m4 = get_encoder(PCNT_M4, enc_m4);
+
+    uint8_t tx_data[8];
+    tx_data[0] = (m1 >> 24) & 0xFF;
+    tx_data[1] = (m1 >> 16) & 0xFF;
+    tx_data[2] = (m1 >>  8) & 0xFF;
+    tx_data[3] =  m1        & 0xFF;
+    tx_data[4] = (m4 >> 24) & 0xFF;
+    tx_data[5] = (m4 >> 16) & 0xFF;
+    tx_data[6] = (m4 >>  8) & 0xFF;
+    tx_data[7] =  m4        & 0xFF;
+
+    can_send(CAN_ID_ENCODER, tx_data);
+    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz
+  }
+}
+
 /* ================= SETUP ================= */
 void setup() {
   Wire.begin();
@@ -255,14 +336,19 @@ void setup() {
     faultStatus |= (1 << FAULT_ADXL_ERROR);
   }
 
-  accelMutex   = xSemaphoreCreateMutex();
-  controlMutex = xSemaphoreCreateMutex();   // ← create control mutex
+  // Encoder PCNT setup — hardware quadrature counting, zero CPU overhead
+  pcnt_init_encoder(PCNT_M1, M1_ENA, M1_ENB);
+  pcnt_init_encoder(PCNT_M4, M4_ENA, M4_ENB);
 
-  xTaskCreatePinnedToCore(can_rx_task,  "rx",   2048, NULL, 3, NULL, 0);
-  xTaskCreatePinnedToCore(control_task, "ctrl", 2048, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(accel_task,   "acl",  2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(can_tx_task,  "tx",   2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(fault_tx_task,"flt",  1024, NULL, 1, NULL, 0);
+  accelMutex   = xSemaphoreCreateMutex();
+  controlMutex = xSemaphoreCreateMutex();
+
+  xTaskCreatePinnedToCore(can_rx_task,    "rx",   2048, NULL, 3, NULL, 0);
+  xTaskCreatePinnedToCore(control_task,   "ctrl", 2048, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(accel_task,     "acl",  2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(can_tx_task,    "tx",   2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(fault_tx_task,  "flt",  1024, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(encoder_tx_task,"enc",  2048, NULL, 2, NULL, 0);
 }
 
 void loop() {
