@@ -29,10 +29,10 @@
 #define MIN_PWM  30
 
 /* ================= ENCODER PINS ================= */
-#define M1_ENA 34   // rear right — PCNT pulse
-#define M1_ENB 35   // rear right — PCNT control (direction)
-#define M4_ENA 36   // rear left  — PCNT pulse
-#define M4_ENB 39   // rear left  — PCNT control (direction)
+#define M1_ENA 23   // rear right — PCNT pulse
+#define M1_ENB 15   // rear right — PCNT control (direction)
+#define M4_ENA 19   // rear left  — PCNT pulse
+#define M4_ENB 18   // rear left  — PCNT control (direction)
 
 #define PCNT_M1 PCNT_UNIT_0
 #define PCNT_M4 PCNT_UNIT_1
@@ -79,6 +79,7 @@ volatile int32_t enc_m4 = 0;   // M4 accumulated count — rear left
 
 // PCNT overflows at ±32767 — accumulate into int32
 static void IRAM_ATTR pcnt_isr(void *arg) {
+  // Called per-unit — arg is NULL, check both units
   uint32_t status;
   pcnt_get_event_status(PCNT_M1, &status);
   if (status & PCNT_EVT_H_LIM) enc_m1 += 32767;
@@ -93,10 +94,10 @@ void pcnt_init_encoder(pcnt_unit_t unit, int pulse_pin, int ctrl_pin) {
   pcnt_config_t cfg = {
     .pulse_gpio_num  = pulse_pin,
     .ctrl_gpio_num   = ctrl_pin,
-    .lctrl_mode      = PCNT_MODE_REVERSE,  // ctrl LOW  → count down
-    .hctrl_mode      = PCNT_MODE_KEEP,     // ctrl HIGH → count up
-    .pos_mode        = PCNT_COUNT_INC,     // rising edge → increment
-    .neg_mode        = PCNT_COUNT_DIS,     // falling edge → ignore
+    .lctrl_mode      = PCNT_MODE_REVERSE,
+    .hctrl_mode      = PCNT_MODE_KEEP,
+    .pos_mode        = PCNT_COUNT_INC,
+    .neg_mode        = PCNT_COUNT_DIS,
     .counter_h_lim   =  32767,
     .counter_l_lim   = -32767,
     .unit            = unit,
@@ -107,7 +108,6 @@ void pcnt_init_encoder(pcnt_unit_t unit, int pulse_pin, int ctrl_pin) {
   pcnt_counter_clear(unit);
   pcnt_event_enable(unit, PCNT_EVT_H_LIM);
   pcnt_event_enable(unit, PCNT_EVT_L_LIM);
-  pcnt_isr_register(pcnt_isr, NULL, 0, NULL);
   pcnt_intr_enable(unit);
   pcnt_counter_resume(unit);
 }
@@ -328,20 +328,44 @@ void encoder_tx_task(void *arg) {
 
 /* ================= SETUP ================= */
 void setup() {
+  Serial.begin(115200);
+  Serial.println("[BOOT] Starting...");
+
   Wire.begin();
+  Serial.println("[BOOT] Wire OK");
+
   motor_init();
+  Serial.println("[BOOT] Motors OK");
+
   can_init();
+  Serial.println("[BOOT] CAN OK");
 
   if(!adxl.begin()) {
     faultStatus |= (1 << FAULT_ADXL_ERROR);
+    Serial.println("[BOOT] ADXL345 FAILED");
+  } else {
+    Serial.println("[BOOT] ADXL345 OK");
   }
 
-  // Encoder PCNT setup — hardware quadrature counting, zero CPU overhead
+  Serial.println("[BOOT] Init PCNT...");
+  pcnt_isr_service_install(0);
+  Serial.println("[BOOT] PCNT ISR service installed");
+
+  pcnt_isr_handler_add(PCNT_M1, pcnt_isr, NULL);
+  Serial.println("[BOOT] PCNT M1 ISR handler added");
+
+  pcnt_isr_handler_add(PCNT_M4, pcnt_isr, NULL);
+  Serial.println("[BOOT] PCNT M4 ISR handler added");
+
   pcnt_init_encoder(PCNT_M1, M1_ENA, M1_ENB);
+  Serial.println("[BOOT] PCNT M1 encoder init OK");
+
   pcnt_init_encoder(PCNT_M4, M4_ENA, M4_ENB);
+  Serial.println("[BOOT] PCNT M4 encoder init OK");
 
   accelMutex   = xSemaphoreCreateMutex();
   controlMutex = xSemaphoreCreateMutex();
+  Serial.println("[BOOT] Mutexes created");
 
   xTaskCreatePinnedToCore(can_rx_task,    "rx",   2048, NULL, 3, NULL, 0);
   xTaskCreatePinnedToCore(control_task,   "ctrl", 2048, NULL, 3, NULL, 1);
@@ -349,6 +373,7 @@ void setup() {
   xTaskCreatePinnedToCore(can_tx_task,    "tx",   2048, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(fault_tx_task,  "flt",  1024, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(encoder_tx_task,"enc",  2048, NULL, 2, NULL, 0);
+  Serial.println("[BOOT] All tasks started");
 }
 
 void loop() {
