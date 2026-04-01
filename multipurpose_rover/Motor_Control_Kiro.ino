@@ -322,7 +322,7 @@ void encoder_tx_task(void *arg) {
     int32_t m1 = get_encoder(PCNT_M1, enc_m1);
     int32_t m4 = get_encoder(PCNT_M4, enc_m4);
 
-    Serial.printf("[ENC] M1=%d  M4=%d\n", m1, m4);
+    // Serial.printf("[ENC] M1=%d  M4=%d\n", m1, m4);
 
     uint8_t tx_data[8];
     tx_data[0] = (m1 >> 24) & 0xFF;
@@ -342,38 +342,36 @@ void encoder_tx_task(void *arg) {
 /* ================= SETUP ================= */
 void setup() {
   Serial.begin(115200);
-  Serial.println("[BOOT] Starting...");
+  // Serial.println("[BOOT] Starting...");
 
   Wire.begin();
-  Serial.println("[BOOT] Wire OK");
+  // Serial.println("[BOOT] Wire OK");
 
   motor_init();
-  Serial.println("[BOOT] Motors OK");
+  // Serial.println("[BOOT] Motors OK");
 
   can_init();
-  Serial.println("[BOOT] CAN OK");
+  // Serial.println("[BOOT] CAN OK");
 
   if(!adxl.begin()) {
     faultStatus |= (1 << FAULT_ADXL_ERROR);
-    Serial.println("[BOOT] ADXL345 FAILED");
-  } else {
-    Serial.println("[BOOT] ADXL345 OK");
+    // Serial.println("[BOOT] ADXL345 FAILED");
   }
+  // else { Serial.println("[BOOT] ADXL345 OK"); }
 
-  Serial.println("[BOOT] Init PCNT...");
+  // Serial.println("[BOOT] Init PCNT...");
   pcnt_init_encoder(PCNT_M1, M1_ENA, M1_ENB);
-  Serial.println("[BOOT] PCNT M1 encoder init OK");
+  // Serial.println("[BOOT] PCNT M1 encoder init OK");
   pcnt_init_encoder(PCNT_M4, M4_ENA, M4_ENB);
-  Serial.println("[BOOT] PCNT M4 encoder init OK");
-  // Register single ISR for both units after both are configured
+  // Serial.println("[BOOT] PCNT M4 encoder init OK");
   pcnt_isr_register(pcnt_isr, NULL, 0, NULL);
   pcnt_intr_enable(PCNT_M1);
   pcnt_intr_enable(PCNT_M4);
-  Serial.println("[BOOT] PCNT ISR registered");
+  // Serial.println("[BOOT] PCNT ISR registered");
 
   accelMutex   = xSemaphoreCreateMutex();
   controlMutex = xSemaphoreCreateMutex();
-  Serial.println("[BOOT] Mutexes created");
+  // Serial.println("[BOOT] Mutexes created");
 
   xTaskCreatePinnedToCore(can_rx_task,    "rx",   2048, NULL, 3, NULL, 0);
   xTaskCreatePinnedToCore(control_task,   "ctrl", 2048, NULL, 3, NULL, 1);
@@ -381,7 +379,7 @@ void setup() {
   xTaskCreatePinnedToCore(can_tx_task,    "tx",   2048, NULL, 2, NULL, 0);
   xTaskCreatePinnedToCore(fault_tx_task,  "flt",  1024, NULL, 1, NULL, 0);
   xTaskCreatePinnedToCore(encoder_tx_task,"enc",  2048, NULL, 2, NULL, 0);
-  Serial.println("[BOOT] All tasks started");
+  // Serial.println("[BOOT] All tasks started");
 }
 
 void loop() {

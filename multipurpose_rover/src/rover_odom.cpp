@@ -29,7 +29,7 @@ using namespace std::chrono_literals;
 // Update these to match your actual rover
 constexpr double WHEEL_RADIUS  = 0.04;    // metres — measure your wheel
 constexpr double WHEEL_BASE    = 0.3048;    // metres — left to right wheel centre
-constexpr double TICKS_PER_REV = 1440.0; // ticks per revolution (PPR × 4 for quadrature)
+constexpr double TICKS_PER_REV = 70.0; // ticks per revolution (PPR × 4 for quadrature)
 
 constexpr double DIST_PER_TICK = (2.0 * M_PI * WHEEL_RADIUS) / TICKS_PER_REV;
 
