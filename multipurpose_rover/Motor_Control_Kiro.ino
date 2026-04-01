@@ -146,7 +146,7 @@ void set_motor(uint8_t motor, int8_t dir, uint8_t pwm) {
 void can_send(uint32_t id, uint8_t *data) {
   twai_message_t tx = {.identifier = id, .data_length_code = 8};
   memcpy(tx.data, data, 8);
-  twai_transmit(&tx, 0);
+  twai_transmit(&tx, pdMS_TO_TICKS(10));  // wait up to 10ms for TX buffer space
 }
 
 void can_init() {
@@ -161,9 +161,13 @@ void can_init() {
 void can_rx_task(void *arg) {
   twai_message_t rx;
   while(1) {
+    // twai_status_info_t status;
+    // twai_get_status_info(&status);
+    // Serial.printf("[CAN] state=%d rx_err=%d tx_err=%d\n",
+    //   status.state, status.rx_error_counter, status.tx_error_counter);
+
     if(twai_receive(&rx, pdMS_TO_TICKS(100)) == ESP_OK) {
       if(rx.identifier == CAN_ID_RECEIVER_DATA && rx.data_length_code == 8) {
-        // Take mutex before writing — prevents torn reads in control_task
         if(xSemaphoreTake(controlMutex, pdMS_TO_TICKS(5)) == pdTRUE) {
           control.y      = (int16_t)((rx.data[0]<<8)|rx.data[1]);
           control.x      = (int16_t)((rx.data[2]<<8)|rx.data[3]);
@@ -174,16 +178,17 @@ void can_rx_task(void *arg) {
         }
         last_rx_time = millis();
         faultStatus &= ~(1 << FAULT_CAN_RX_TIMEOUT);
-        Serial.printf("[CAN RX] x=%d y=%d speed=%d enable=%d mode=%d\n",
-          control.x, control.y, control.speed, control.enable, control.mode);
-      } else {
-        Serial.printf("[CAN RX] Unknown ID=0x%X dlc=%d\n",
-          rx.identifier, rx.data_length_code);
+        // Serial.printf("[CAN RX] x=%d y=%d speed=%d enable=%d mode=%d\n",
+        //   control.x, control.y, control.speed, control.enable, control.mode);
       }
+      // else {
+      //   Serial.printf("[CAN RX] Unknown ID=0x%X dlc=%d\n",
+      //     rx.identifier, rx.data_length_code);
+      // }
     } else {
       if(millis() - last_rx_time > 500) {
         faultStatus |= (1 << FAULT_CAN_RX_TIMEOUT);
-        Serial.println("[CAN RX] TIMEOUT — no frame for 500ms");
+        // Serial.println("[CAN RX] TIMEOUT — no frame for 500ms");
       }
     }
   }

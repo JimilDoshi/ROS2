@@ -1,6 +1,7 @@
 /************************************************************
  * rover_can_receiver.cpp
- * Reads CAN frames from can0 and publishes encoder data.
+ * Reads CAN frames from can0 in a dedicated thread (blocking)
+ * and publishes encoder data to /encoder_raw at consistent rate.
  *
  * CAN ID 0x201 → /encoder_raw (Int32MultiArray)
  *   data[0] = M1 ticks (rear right, int32)
@@ -16,18 +17,16 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <cstring>
-#include <chrono>
-
-using namespace std::chrono_literals;
+#include <thread>
+#include <atomic>
 
 #define CAN_ID_ENCODER  0x201
 #define CAN_INTERFACE   "can0"
 
 class RoverCANReceiver : public rclcpp::Node {
 public:
-    RoverCANReceiver() : Node("rover_can_receiver"), can_fd_(-1) {
+    RoverCANReceiver() : Node("rover_can_receiver"), can_fd_(-1), running_(true) {
 
         encoder_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>(
             "encoder_raw", 10
@@ -38,16 +37,19 @@ public:
             return;
         }
 
-        // Poll CAN socket at 50Hz
-        timer_ = this->create_wall_timer(
-            20ms, std::bind(&RoverCANReceiver::timerCallback, this)
-        );
+        // Dedicated blocking read thread — never misses a frame
+        can_thread_ = std::thread(&RoverCANReceiver::canReadLoop, this);
 
         RCLCPP_INFO(this->get_logger(), "rover_can_receiver ready on %s", CAN_INTERFACE);
     }
 
     ~RoverCANReceiver() {
-        if (can_fd_ >= 0) close(can_fd_);
+        running_ = false;
+        if (can_fd_ >= 0) {
+            shutdown(can_fd_, SHUT_RDWR);
+            close(can_fd_);
+        }
+        if (can_thread_.joinable()) can_thread_.join();
     }
 
 private:
@@ -68,18 +70,16 @@ private:
         if (bind(can_fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
             close(can_fd_); can_fd_ = -1; return false;
         }
-
-        // Non-blocking reads
-        fcntl(can_fd_, F_SETFL, O_NONBLOCK);
         return true;
     }
 
-    void timerCallback() {
+    void canReadLoop() {
         struct can_frame frame;
-        ssize_t n;
+        while (running_) {
+            // Blocking read — wakes immediately when a frame arrives
+            ssize_t n = read(can_fd_, &frame, sizeof(frame));
+            if (n < (ssize_t)sizeof(frame)) continue;
 
-        // Drain all available frames
-        while ((n = read(can_fd_, &frame, sizeof(frame))) > 0) {
             if (frame.can_id == CAN_ID_ENCODER && frame.can_dlc == 8) {
                 int32_t m1 = ((int32_t)frame.data[0] << 24) |
                              ((int32_t)frame.data[1] << 16) |
@@ -99,8 +99,9 @@ private:
     }
 
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr encoder_pub_;
-    rclcpp::TimerBase::SharedPtr timer_;
+    std::thread can_thread_;
     int can_fd_;
+    std::atomic<bool> running_;
 };
 
 int main(int argc, char *argv[]) {
