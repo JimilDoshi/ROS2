@@ -26,10 +26,14 @@
 using namespace std::chrono_literals;
 
 // ---- Rover physical parameters ---- //
-// Update these to match your actual rover
-constexpr double WHEEL_RADIUS  = 0.04;    // metres — measure your wheel
-constexpr double WHEEL_BASE    = 0.3048;    // metres — left to right wheel centre
-constexpr double TICKS_PER_REV = 70.0; // ticks per revolution (PPR × 4 for quadrature)
+// Wheel diameter = 8cm → radius = 0.04m
+// Circumference = 2π × 0.04 = 0.2513m
+// Ticks per rev = 70
+// Dist per tick = 0.2513 / 70 = 0.003590m
+// Ticks for 1m  = 1 / 0.003590 ≈ 279 ticks
+constexpr double WHEEL_RADIUS  = 0.04;   // 8cm diameter → 4cm radius
+constexpr double WHEEL_BASE    = 0.30;   // metres — measure left to right wheel centre
+constexpr double TICKS_PER_REV = 70.0;  // ticks per full wheel revolution
 
 constexpr double DIST_PER_TICK = (2.0 * M_PI * WHEEL_RADIUS) / TICKS_PER_REV;
 
@@ -61,9 +65,15 @@ private:
         if (!initialized_) {
             last_ticks_right_ = ticks_right;
             last_ticks_left_  = ticks_left;
+            last_time_ = this->now();
             initialized_ = true;
             return;
         }
+
+        auto now = this->now();
+        double dt = (now - last_time_).seconds();
+        if (dt <= 0.0) return;
+        last_time_ = now;
 
         // Delta ticks since last callback
         int32_t d_right = ticks_right - last_ticks_right_;
@@ -84,8 +94,6 @@ private:
         x_ += dist * std::cos(theta_);
         y_ += dist * std::sin(theta_);
 
-        auto now = this->now();
-
         // ---- Publish /odom ----
         nav_msgs::msg::Odometry odom;
         odom.header.stamp    = now;
@@ -103,11 +111,9 @@ private:
         odom.pose.pose.orientation.z = q.z();
         odom.pose.pose.orientation.w = q.w();
 
-        // Velocity (approximate — assumes constant velocity between callbacks)
-        // Use a small dt estimate based on encoder publish rate (20Hz = 0.05s)
-        constexpr double DT = 0.05;
-        odom.twist.twist.linear.x  = dist   / DT;
-        odom.twist.twist.angular.z = d_theta / DT;
+        // Velocity using actual dt
+        odom.twist.twist.linear.x  = dist    / dt;
+        odom.twist.twist.angular.z = d_theta / dt;
 
         // Covariance — diagonal, tuned conservatively
         odom.pose.covariance[0]  = 0.01;   // x
@@ -141,6 +147,7 @@ private:
 
     double x_, y_, theta_;
     int32_t last_ticks_right_, last_ticks_left_;
+    rclcpp::Time last_time_;
     bool initialized_;
 };
 
