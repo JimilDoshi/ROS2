@@ -50,6 +50,7 @@ public:
         );
 
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+        debug_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("odom_debug", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
         RCLCPP_INFO(this->get_logger(), "rover_odom ready — publishing /odom and /tf");
@@ -59,8 +60,8 @@ private:
     void encoderCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg) {
         if (msg->data.size() < 2) return;
 
-        int32_t ticks_right = msg->data[0];  // M1 rear right
-        int32_t ticks_left  = msg->data[1];  // M4 rear left
+        int32_t ticks_right = -msg->data[0];  // M1 rear right — negated (encoder mounted inverted)
+        int32_t ticks_left  =  msg->data[1];  // M4 rear left — raw
 
         if (!initialized_) {
             last_ticks_right_ = ticks_right;
@@ -80,6 +81,11 @@ private:
         int32_t d_left  = ticks_left  - last_ticks_left_;
         last_ticks_right_ = ticks_right;
         last_ticks_left_  = ticks_left;
+
+        // Publish d_right and d_left for debugging
+        std_msgs::msg::Int32MultiArray dbg;
+        dbg.data = {d_right, d_left};
+        debug_pub_->publish(dbg);
 
         // Distance travelled by each wheel
         double dist_right = d_right * DIST_PER_TICK;
@@ -143,6 +149,7 @@ private:
 
     rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
+    rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr debug_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
 
     double x_, y_, theta_;
