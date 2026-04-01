@@ -174,10 +174,16 @@ void can_rx_task(void *arg) {
         }
         last_rx_time = millis();
         faultStatus &= ~(1 << FAULT_CAN_RX_TIMEOUT);
+        Serial.printf("[CAN RX] x=%d y=%d speed=%d enable=%d mode=%d\n",
+          control.x, control.y, control.speed, control.enable, control.mode);
+      } else {
+        Serial.printf("[CAN RX] Unknown ID=0x%X dlc=%d\n",
+          rx.identifier, rx.data_length_code);
       }
     } else {
       if(millis() - last_rx_time > 500) {
         faultStatus |= (1 << FAULT_CAN_RX_TIMEOUT);
+        Serial.println("[CAN RX] TIMEOUT — no frame for 500ms");
       }
     }
   }
