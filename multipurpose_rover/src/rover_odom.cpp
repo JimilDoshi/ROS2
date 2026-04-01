@@ -18,6 +18,7 @@
 #include "nav_msgs/msg/odometry.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2_ros/transform_broadcaster.h"
+#include "tf2_ros/static_transform_broadcaster.h"
 #include "tf2/LinearMath/Quaternion.h"
 
 #include <cmath>
@@ -52,8 +53,13 @@ public:
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
         debug_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("odom_debug", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
+        static_tf_broadcaster_ = std::make_unique<tf2_ros::StaticTransformBroadcaster>(*this);
 
-        RCLCPP_INFO(this->get_logger(), "rover_odom ready — publishing /odom and /tf");
+        // Publish static TF: base_link → laser
+        // Adjust x/y/z offset to match where the RPLIDAR is mounted on your rover
+        publishLaserTF();
+
+        RCLCPP_INFO(this->get_logger(), "rover_odom ready — publishing /odom, /tf and base_link→laser");
     }
 
 private:
@@ -147,10 +153,31 @@ private:
         tf_broadcaster_->sendTransform(tf);
     }
 
+    void publishLaserTF() {
+        geometry_msgs::msg::TransformStamped laser_tf;
+        laser_tf.header.stamp    = this->now();
+        laser_tf.header.frame_id = "base_link";
+        laser_tf.child_frame_id  = "laser";
+
+        // Adjust these offsets to match your RPLIDAR mounting position
+        laser_tf.transform.translation.x = 0.0;   // metres forward from base_link
+        laser_tf.transform.translation.y = 0.0;   // metres left from base_link
+        laser_tf.transform.translation.z = 0.1;   // metres up from base_link
+
+        // No rotation — lidar faces forward same as robot
+        laser_tf.transform.rotation.x = 0.0;
+        laser_tf.transform.rotation.y = 0.0;
+        laser_tf.transform.rotation.z = 0.0;
+        laser_tf.transform.rotation.w = 1.0;
+
+        static_tf_broadcaster_->sendTransform(laser_tf);
+    }
+
     rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr debug_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
     double x_, y_, theta_;
     int32_t last_ticks_right_, last_ticks_left_;
