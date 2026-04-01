@@ -319,10 +319,15 @@ void fault_tx_task(void *arg) {
 //   byte[4..7] = enc_m4 (rear left,  int32_t big-endian)
 void encoder_tx_task(void *arg) {
   while(1) {
+    int16_t raw_m1 = 0, raw_m4 = 0;
+    pcnt_get_counter_value(PCNT_M1, &raw_m1);
+    pcnt_get_counter_value(PCNT_M4, &raw_m4);
+
     int32_t m1 = get_encoder(PCNT_M1, enc_m1);
     int32_t m4 = get_encoder(PCNT_M4, enc_m4);
 
-    // Serial.printf("[ENC] M1=%d  M4=%d\n", m1, m4);
+    Serial.printf("[PCNT RAW] M1=%d  M4=%d  | [ACC] M1=%d  M4=%d\n",
+                  raw_m1, raw_m4, m1, m4);
 
     uint8_t tx_data[8];
     tx_data[0] = (m1 >> 24) & 0xFF;
