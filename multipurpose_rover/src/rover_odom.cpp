@@ -59,7 +59,13 @@ public:
         // Adjust x/y/z offset to match where the RPLIDAR is mounted on your rover
         publishLaserTF();
 
-        RCLCPP_INFO(this->get_logger(), "rover_odom ready — publishing /odom, /tf and base_link→laser");
+        // Publish odom→base_link TF at 20Hz regardless of encoder data
+        // This ensures slam_toolbox always has a valid TF even when rover is stationary
+        tf_timer_ = this->create_wall_timer(
+            50ms, std::bind(&RoverOdom::publishTF, this)
+        );
+
+        RCLCPP_INFO(this->get_logger(), "rover_odom ready");
     }
 
 private:
@@ -135,8 +141,10 @@ private:
         odom.twist.covariance[35] = 0.05;
 
         odom_pub_->publish(odom);
+    }
 
-        // ---- Broadcast odom → base_link TF ----
+    void publishTF() {
+        auto now = this->now();
         geometry_msgs::msg::TransformStamped tf;
         tf.header.stamp    = now;
         tf.header.frame_id = "odom";
@@ -145,6 +153,9 @@ private:
         tf.transform.translation.x = x_;
         tf.transform.translation.y = y_;
         tf.transform.translation.z = 0.0;
+
+        tf2::Quaternion q;
+        q.setRPY(0, 0, theta_);
         tf.transform.rotation.x = q.x();
         tf.transform.rotation.y = q.y();
         tf.transform.rotation.z = q.z();
@@ -176,6 +187,7 @@ private:
     rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr debug_pub_;
+    rclcpp::TimerBase::SharedPtr tf_timer_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
