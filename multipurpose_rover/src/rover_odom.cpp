@@ -171,9 +171,9 @@ private:
         laser_tf.child_frame_id  = "laser";
 
         // Adjust these offsets to match your RPLIDAR mounting position
-        laser_tf.transform.translation.x = 0.0;   // metres forward from base_link
+        laser_tf.transform.translation.x = 0.27;   // metres forward from base_link
         laser_tf.transform.translation.y = 0.0;   // metres left from base_link
-        laser_tf.transform.translation.z = 0.1;   // metres up from base_link
+        laser_tf.transform.translation.z = 0.15;   // metres up from base_link
 
         // No rotation — lidar faces forward same as robot
         laser_tf.transform.rotation.x = 0.0;
