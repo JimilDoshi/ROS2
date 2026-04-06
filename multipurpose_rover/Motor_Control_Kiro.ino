@@ -239,10 +239,14 @@ void control_task(void *arg) {
     if(abs(left)  < 10) left  = 0;
     if(abs(right) < 10) right = 0;
 
-    set_motor(1, left>=0?1:-1,  abs(left));
-    set_motor(4, right>=0?1:-1, abs(right));
-    set_motor(2, left>=0?-1:1,  abs(left));
-    set_motor(3, right>=0?-1:1, abs(right));
+    // Motor layout:
+    // M1=rear right, M2=front right → right side (inverted mounting)
+    // M3=front left, M4=rear left   → left side (normal mounting)
+    // right side uses 'left' value, left side uses 'right' value
+    set_motor(1, left>=0?-1:1,  abs(left));   // rear right — inverted
+    set_motor(2, left>=0?-1:1,  abs(left));   // front right — inverted
+    set_motor(3, right>=0?1:-1, abs(right));  // front left — normal
+    set_motor(4, right>=0?1:-1, abs(right));  // rear left — normal
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
