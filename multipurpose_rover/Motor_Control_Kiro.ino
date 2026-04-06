@@ -222,33 +222,47 @@ void control_task(void *arg) {
     }
 
     float mode_scale = (local.mode==0) ? 0.3f : (local.mode==1) ? 0.6f : 1.0f;
-    float throttle = (local.x / 100.0f) * local.speed * mode_scale;
-    float turn     = (local.y / 100.0f) * local.speed * mode_scale;
 
-    // Skid steer: right side and left side get opposite throttle signs
-    // because right side motors are physically inverted vs left side
-    int16_t rs = (int16_t)constrain(-(throttle - turn), -100, 100);  // right side
-    int16_t ls = (int16_t)constrain( (throttle - turn), -100, 100);  // left side — mirror of rs
+    // x = throttle (-100 to 100), y = steering (-100 to 100)
+    // Scale by speed and mode
+    float fwd  =  (local.x / 100.0f) * local.speed * mode_scale;  // positive = forward
+    float steer = (local.y / 100.0f) * local.speed * mode_scale;  // positive = left turn
 
-    // Scale to PWM range
-    rs = (int16_t)((rs / 100.0f) * MAX_PWM);
-    ls = (int16_t)((ls / 100.0f) * MAX_PWM);
+    // Right side motors (M1, M2) — physically inverted, so negate fwd
+    // Left side motors  (M3, M4) — normal
+    // For turns: right side and left side spin opposite directions
+    //   right turn (steer < 0): right side reverse, left side forward
+    //   left  turn (steer > 0): right side forward, left side reverse
+    float right_side = -fwd + steer;   // right side
+    float left_side  =  fwd - steer;   // left side — steer opposite to right
 
-    // Apply MIN_PWM threshold
-    if(rs > 0) rs = (rs < MIN_PWM) ? MIN_PWM : rs;
-    if(rs < 0) rs = (rs > -MIN_PWM) ? -MIN_PWM : rs;
-    if(ls > 0) ls = (ls < MIN_PWM) ? MIN_PWM : ls;
-    if(ls < 0) ls = (ls > -MIN_PWM) ? -MIN_PWM : ls;
+    // Clamp to [-100, 100]
+    right_side = constrain(right_side, -100.0f, 100.0f);
+    left_side  = constrain(left_side,  -100.0f, 100.0f);
 
-    // Dead zone
-    if(abs(rs) < 10) rs = 0;
-    if(abs(ls) < 10) ls = 0;
+    // Convert to PWM
+    int16_t rs = (int16_t)((right_side / 100.0f) * MAX_PWM);
+    int16_t ls = (int16_t)((left_side  / 100.0f) * MAX_PWM);
 
-    // All motors use same direction logic — rs/ls sign determines direction
-    set_motor(1, rs>=0?1:-1, abs(rs));
-    set_motor(2, rs>=0?1:-1, abs(rs));
-    set_motor(3, ls>=0?1:-1, abs(ls));
-    set_motor(4, ls>=0?1:-1, abs(ls));
+    // Apply MIN_PWM deadband
+    if (rs > 0 && rs < MIN_PWM)  rs =  MIN_PWM;
+    if (rs < 0 && rs > -MIN_PWM) rs = -MIN_PWM;
+    if (ls > 0 && ls < MIN_PWM)  ls =  MIN_PWM;
+    if (ls < 0 && ls > -MIN_PWM) ls = -MIN_PWM;
+
+    // Zero dead zone
+    if (abs(rs) < 10) rs = 0;
+    if (abs(ls) < 10) ls = 0;
+
+    // Drive motors
+    // rs > 0 → right side forward  → dir = +1
+    // rs < 0 → right side reverse  → dir = -1
+    // ls > 0 → left side forward   → dir = +1
+    // ls < 0 → left side reverse   → dir = -1
+    set_motor(1, rs > 0 ? 1 : -1, abs(rs));  // M1 rear right
+    set_motor(2, rs > 0 ? 1 : -1, abs(rs));  // M2 front right
+    set_motor(3, ls > 0 ? 1 : -1, abs(ls));  // M3 front left
+    set_motor(4, ls > 0 ? 1 : -1, abs(ls));  // M4 rear left
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
