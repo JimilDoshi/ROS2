@@ -225,9 +225,10 @@ void control_task(void *arg) {
     float throttle = (local.x / 100.0f) * local.speed * mode_scale;
     float turn     = (local.y / 100.0f) * local.speed * mode_scale;
 
-    // Both sides use same value — turn direction handled by opposite motor direction logic
-    int16_t rs = (int16_t)constrain(throttle - turn, -100, 100);
-    int16_t ls = (int16_t)constrain(throttle - turn, -100, 100);
+    // Skid steer: right side and left side get opposite throttle signs
+    // because right side motors are physically inverted vs left side
+    int16_t rs = (int16_t)constrain(-(throttle - turn), -100, 100);  // right side
+    int16_t ls = (int16_t)constrain( (throttle - turn), -100, 100);  // left side — mirror of rs
 
     // Scale to PWM range
     rs = (int16_t)((rs / 100.0f) * MAX_PWM);
@@ -243,10 +244,9 @@ void control_task(void *arg) {
     if(abs(rs) < 10) rs = 0;
     if(abs(ls) < 10) ls = 0;
 
-    // M1,M2 right side — inverted mounting (positive = reverse)
-    // M3,M4 left side  — normal mounting  (positive = forward)
-    set_motor(1, rs>=0?-1:1, abs(rs));
-    set_motor(2, rs>=0?-1:1, abs(rs));
+    // All motors use same direction logic — rs/ls sign determines direction
+    set_motor(1, rs>=0?1:-1, abs(rs));
+    set_motor(2, rs>=0?1:-1, abs(rs));
     set_motor(3, ls>=0?1:-1, abs(ls));
     set_motor(4, ls>=0?1:-1, abs(ls));
 
