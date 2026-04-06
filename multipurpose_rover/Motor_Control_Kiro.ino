@@ -12,8 +12,7 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <Adafruit_ADXL345_U.h>
-#include <ESP32CAN.h>
-#include <CAN_config.h>
+#include <TWAI.h>
 #include <ESP32Encoder.h>
 
 /* ================= MOTOR PINS ================= */
@@ -66,8 +65,6 @@ uint8_t faultStatus = 0;
 ESP32Encoder enc_m1;
 ESP32Encoder enc_m4;
 
-CAN_device_t CAN_cfg;
-
 /* ================= MOTOR ================= */
 void motor_init() {
   pinMode(MOTOR1_RPWM, OUTPUT); pinMode(MOTOR1_LPWM, OUTPUT);
@@ -92,34 +89,31 @@ void stop_all() {
 
 /* ================= CAN ================= */
 void can_init() {
-  CAN_cfg.speed     = CAN_SPEED_500KBPS;
-  CAN_cfg.tx_pin_id = CAN_TX_PIN;
-  CAN_cfg.rx_pin_id = CAN_RX_PIN;
-  CAN_cfg.rx_queue  = xQueueCreate(10, sizeof(CAN_frame_t));
-  ESP32Can.CANInit();
+  TWAI.setPins(CAN_RX_PIN, CAN_TX_PIN);
+  TWAI.begin(TWAI_SPEED_500KBPS);
 }
 
 void can_send(uint32_t id, uint8_t *data) {
-  CAN_frame_t frame;
-  frame.FIR.B.FF  = CAN_frame_std;
-  frame.MsgID     = id;
-  frame.FIR.B.DLC = 8;
-  memcpy(frame.data.u8, data, 8);
-  ESP32Can.CANWriteFrame(&frame);
+  TWAI.beginPacket(id);
+  TWAI.write(data, 8);
+  TWAI.endPacket();
 }
 
 /* ================= CAN RX TASK ================= */
 void can_rx_task(void *arg) {
-  CAN_frame_t rx;
   while (1) {
-    if (xQueueReceive(CAN_cfg.rx_queue, &rx, pdMS_TO_TICKS(100)) == pdTRUE) {
-      if (rx.MsgID == CAN_ID_CMD && rx.FIR.B.DLC == 8) {
+    int size = TWAI.parsePacket();
+    if (size > 0 && !TWAI.packetRtr()) {
+      uint32_t id = TWAI.packetId();
+      if (id == CAN_ID_CMD && size == 8) {
+        uint8_t buf[8];
+        for (int i = 0; i < 8; i++) buf[i] = TWAI.read();
         if (xSemaphoreTake(ctrlMutex, pdMS_TO_TICKS(5))) {
-          ctrl.y      = (int16_t)((rx.data.u8[0] << 8) | rx.data.u8[1]);
-          ctrl.x      = (int16_t)((rx.data.u8[2] << 8) | rx.data.u8[3]);
-          ctrl.speed  = rx.data.u8[4];
-          ctrl.enable = rx.data.u8[5];
-          ctrl.mode   = rx.data.u8[6];
+          ctrl.y      = (int16_t)((buf[0] << 8) | buf[1]);
+          ctrl.x      = (int16_t)((buf[2] << 8) | buf[3]);
+          ctrl.speed  = buf[4];
+          ctrl.enable = buf[5];
+          ctrl.mode   = buf[6];
           xSemaphoreGive(ctrlMutex);
         }
         last_rx_time = millis();
@@ -131,6 +125,7 @@ void can_rx_task(void *arg) {
           xSemaphoreGive(ctrlMutex);
         }
       }
+      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 }
