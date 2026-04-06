@@ -225,34 +225,30 @@ void control_task(void *arg) {
     float throttle = (local.x / 100.0f) * local.speed * mode_scale;
     float turn     = (local.y / 100.0f) * local.speed * mode_scale;
 
-    // right side: throttle - turn
-    // left side:  throttle - turn (same — turn handled by opposite direction logic)
+    // Both sides use same value — turn direction handled by opposite motor direction logic
     int16_t rs = (int16_t)constrain(throttle - turn, -100, 100);
     int16_t ls = (int16_t)constrain(throttle - turn, -100, 100);
 
-    left  = (int16_t)((left  / 100.0f) * MAX_PWM);
-    right = (int16_t)((right / 100.0f) * MAX_PWM);
+    // Scale to PWM range
+    rs = (int16_t)((rs / 100.0f) * MAX_PWM);
+    ls = (int16_t)((ls / 100.0f) * MAX_PWM);
 
-    if(left  > 0) left  = (left  < MIN_PWM) ? MIN_PWM : left;
-    if(left  < 0) left  = (left  > -MIN_PWM) ? -MIN_PWM : left;
-    if(right > 0) right = (right < MIN_PWM) ? MIN_PWM : right;
-    if(right < 0) right = (right > -MIN_PWM) ? -MIN_PWM : right;
+    // Apply MIN_PWM threshold
+    if(rs > 0) rs = (rs < MIN_PWM) ? MIN_PWM : rs;
+    if(rs < 0) rs = (rs > -MIN_PWM) ? -MIN_PWM : rs;
+    if(ls > 0) ls = (ls < MIN_PWM) ? MIN_PWM : ls;
+    if(ls < 0) ls = (ls > -MIN_PWM) ? -MIN_PWM : ls;
 
-    if(abs(left)  < 10) left  = 0;
-    if(abs(right) < 10) right = 0;
+    // Dead zone
+    if(abs(rs) < 10) rs = 0;
+    if(abs(ls) < 10) ls = 0;
 
-    // Differential skid steer:
-    // right side: M1(rear right) + M2(front right) — inverted mounting
-    // left side:  M3(front left) + M4(rear left)   — normal mounting
-    // 'left' drives right-side wheels, 'right' drives left-side wheels
-    // M1,M2 = right side (inverted mounting): positive value → reverse
-    // M3,M4 = left side (normal mounting):   positive value → forward
-    // For forward/reverse: both sides same sign → opposite physical directions ✓
-    // For turns: left and right values have opposite signs → both sides turn same way ✓
-    set_motor(1, rs>=0?-1:1, abs(rs));  // rear right
-    set_motor(2, rs>=0?-1:1, abs(rs));  // front right
-    set_motor(3, ls>=0?1:-1, abs(ls));  // front left  — opposite to right side
-    set_motor(4, ls>=0?1:-1, abs(ls));  // rear left   — opposite to right side
+    // M1,M2 right side — inverted mounting (positive = reverse)
+    // M3,M4 left side  — normal mounting  (positive = forward)
+    set_motor(1, rs>=0?-1:1, abs(rs));
+    set_motor(2, rs>=0?-1:1, abs(rs));
+    set_motor(3, ls>=0?1:-1, abs(ls));
+    set_motor(4, ls>=0?1:-1, abs(ls));
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
