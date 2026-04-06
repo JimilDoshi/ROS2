@@ -1,9 +1,5 @@
 /************************************************************
- * ESP32 Motor Driver ECU
- * Using Arduino ESP32 Core APIs (ESP32 Arduino Core v3.x)
- * - LEDC via ledcAttach/ledcWrite
- * - CAN via ESP32Can library
- * - PCNT via ESP32Encoder library
+ * ESP32 Motor Driver ECU — FINAL STABLE VERSION
  ************************************************************/
 
 #include <Arduino.h>
@@ -12,38 +8,47 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <Adafruit_ADXL345_U.h>
-#include <TWAI.h>
-#include <ESP32Encoder.h>
+#include "driver/twai.h"
+#include "driver/pcnt.h"
 
 /* ================= MOTOR PINS ================= */
-#define MOTOR1_RPWM 26  // rear right
+#define MOTOR1_RPWM 26   // rear right
 #define MOTOR1_LPWM 27
-#define MOTOR2_RPWM 32  // front right
+#define MOTOR2_RPWM 32   // front right
 #define MOTOR2_LPWM 33
-#define MOTOR3_RPWM 25  // front left
+#define MOTOR3_RPWM 25   // front left
 #define MOTOR3_LPWM 14
-#define MOTOR4_RPWM 12  // rear left
+#define MOTOR4_RPWM 12   // rear left
 #define MOTOR4_LPWM 13
 
 /* ================= PWM ================= */
-#define MAX_PWM   255
+#define PWM_FREQ 5000
+#define PWM_RES  8
+#define MAX_PWM  255
 
-/* ================= ENCODER PINS ================= */
+// PWM channels
+enum {
+  CH_M1_R, CH_M1_L, CH_M2_R, CH_M2_L,
+  CH_M3_R, CH_M3_L, CH_M4_R, CH_M4_L
+};
+
+/* ================= ENCODERS ================= */
 #define M1_ENA 23
 #define M1_ENB 15
 #define M4_ENA 19
 #define M4_ENB 18
+#define PCNT_M1 PCNT_UNIT_0
+#define PCNT_M4 PCNT_UNIT_1
 
 /* ================= CAN ================= */
-#define CAN_TX_PIN GPIO_NUM_5
-#define CAN_RX_PIN GPIO_NUM_4
-
+#define CAN_TX GPIO_NUM_5
+#define CAN_RX GPIO_NUM_4
 #define CAN_ID_CMD      0x101
 #define CAN_ID_FEEDBACK 0x200
 #define CAN_ID_ENCODER  0x201
 #define CAN_ID_FAULT    0x300
 
-/* ================= CONTROL DATA ================= */
+/* ================= CONTROL ================= */
 typedef struct {
   int16_t x;
   int16_t y;
@@ -52,172 +57,175 @@ typedef struct {
   uint8_t mode;
 } ControlData_t;
 
-/* ================= GLOBALS ================= */
 ControlData_t ctrl = {0};
 SemaphoreHandle_t ctrlMutex;
 uint32_t last_rx_time = 0;
 
+/* ================= ACCEL ================= */
 Adafruit_ADXL345_Unified adxl(12345);
 SemaphoreHandle_t accelMutex;
-float ax_ = 0, ay_ = 0, az_ = 0;
+float ax_=0, ay_=0, az_=0;
+bool accel_ok = true;
 uint8_t faultStatus = 0;
 
-ESP32Encoder enc_m1;
-ESP32Encoder enc_m4;
+/* ================= ENCODER ================= */
+volatile int32_t enc_m1 = 0;
+volatile int32_t enc_m4 = 0;
 
-/* ================= MOTOR ================= */
-void motor_init() {
-  pinMode(MOTOR1_RPWM, OUTPUT); pinMode(MOTOR1_LPWM, OUTPUT);
-  pinMode(MOTOR2_RPWM, OUTPUT); pinMode(MOTOR2_LPWM, OUTPUT);
-  pinMode(MOTOR3_RPWM, OUTPUT); pinMode(MOTOR3_LPWM, OUTPUT);
-  pinMode(MOTOR4_RPWM, OUTPUT); pinMode(MOTOR4_LPWM, OUTPUT);
+static void IRAM_ATTR pcnt_isr(void *arg) {
+  uint32_t s0, s1;
+  pcnt_get_event_status(PCNT_M1, &s0);
+  pcnt_get_event_status(PCNT_M4, &s1);
+
+  if (s0 & PCNT_EVT_H_LIM) enc_m1 += 32767;
+  if (s0 & PCNT_EVT_L_LIM) enc_m1 -= 32767;
+  if (s1 & PCNT_EVT_H_LIM) enc_m4 += 32767;
+  if (s1 & PCNT_EVT_L_LIM) enc_m4 -= 32767;
+
+  pcnt_counter_clear(PCNT_M1);
+  pcnt_counter_clear(PCNT_M4);
 }
 
-void set_motor(uint8_t rpwm, uint8_t lpwm, int16_t pwm) {
+void pcnt_init(pcnt_unit_t unit, int pulse, int ctrl_pin) {
+  pcnt_config_t cfg = {
+    .pulse_gpio_num = pulse,
+    .ctrl_gpio_num  = ctrl_pin,
+    .lctrl_mode     = PCNT_MODE_REVERSE,
+    .hctrl_mode     = PCNT_MODE_KEEP,
+    .pos_mode       = PCNT_COUNT_INC,
+    .neg_mode       = PCNT_COUNT_DIS,
+    .counter_h_lim  =  32767,
+    .counter_l_lim  = -32767,
+    .unit           = unit,
+    .channel        = PCNT_CHANNEL_0,
+  };
+  pcnt_unit_config(&cfg);
+  pcnt_event_enable(unit, PCNT_EVT_H_LIM);
+  pcnt_event_enable(unit, PCNT_EVT_L_LIM);
+  pcnt_counter_pause(unit);
+  pcnt_counter_clear(unit);
+  pcnt_counter_resume(unit);
+}
+
+int32_t get_enc(pcnt_unit_t unit, volatile int32_t &acc) {
+  int16_t v;
+  pcnt_get_counter_value(unit, &v);
+  return acc + v;
+}
+
+/* ================= PWM MOTOR ================= */
+void setup_pwm(int pin, int ch) {
+  ledcSetup(ch, PWM_FREQ, PWM_RES);
+  ledcAttachPin(pin, ch);
+}
+
+void motor_init() {
+  setup_pwm(MOTOR1_RPWM, CH_M1_R); setup_pwm(MOTOR1_LPWM, CH_M1_L);
+  setup_pwm(MOTOR2_RPWM, CH_M2_R); setup_pwm(MOTOR2_LPWM, CH_M2_L);
+  setup_pwm(MOTOR3_RPWM, CH_M3_R); setup_pwm(MOTOR3_LPWM, CH_M3_L);
+  setup_pwm(MOTOR4_RPWM, CH_M4_R); setup_pwm(MOTOR4_LPWM, CH_M4_L);
+}
+
+void set_motor(uint8_t ch_r, uint8_t ch_l, int16_t pwm) {
   pwm = constrain(pwm, -MAX_PWM, MAX_PWM);
-  if (pwm > 0)      { analogWrite(rpwm, pwm);  analogWrite(lpwm, 0);    }
-  else if (pwm < 0) { analogWrite(rpwm, 0);    analogWrite(lpwm, -pwm); }
-  else              { analogWrite(rpwm, 0);    analogWrite(lpwm, 0);    }
+  if (pwm > 0) {
+    ledcWrite(ch_r, pwm);
+    ledcWrite(ch_l, 0);
+  } else if (pwm < 0) {
+    ledcWrite(ch_r, 0);
+    ledcWrite(ch_l, -pwm);
+  } else {
+    ledcWrite(ch_r, 0);
+    ledcWrite(ch_l, 0);
+  }
 }
 
 void stop_all() {
-  set_motor(MOTOR1_RPWM, MOTOR1_LPWM, 0);
-  set_motor(MOTOR2_RPWM, MOTOR2_LPWM, 0);
-  set_motor(MOTOR3_RPWM, MOTOR3_LPWM, 0);
-  set_motor(MOTOR4_RPWM, MOTOR4_LPWM, 0);
+  for (int i=0;i<8;i++) ledcWrite(i,0);
+}
+
+/* ================= MOTOR RAMP ================= */
+int16_t ramp(int16_t target, int16_t current, int step=6) {
+  if (target > current) return min(current+step, target);
+  if (target < current) return max(current-step, target);
+  return current;
 }
 
 /* ================= CAN ================= */
-void can_init() {
-  TWAI.setPins(CAN_RX_PIN, CAN_TX_PIN);
-  TWAI.begin(TWAI_SPEED_500KBPS);
-}
-
 void can_send(uint32_t id, uint8_t *data) {
-  TWAI.beginPacket(id);
-  TWAI.write(data, 8);
-  TWAI.endPacket();
+  twai_message_t tx = {.identifier=id,.data_length_code=8};
+  memcpy(tx.data,data,8);
+  twai_transmit(&tx,pdMS_TO_TICKS(10));
 }
 
-/* ================= CAN RX TASK ================= */
+void can_init() {
+  twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX,CAN_RX,TWAI_MODE_NORMAL);
+  twai_timing_config_t  t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  twai_driver_install(&g,&t,&f);
+  twai_start();
+}
+
+/* ================= CAN RX ================= */
 void can_rx_task(void *arg) {
+  twai_message_t rx;
   while (1) {
-    int size = TWAI.parsePacket();
-    if (size > 0 && !TWAI.packetRtr()) {
-      uint32_t id = TWAI.packetId();
-      if (id == CAN_ID_CMD && size == 8) {
-        uint8_t buf[8];
-        for (int i = 0; i < 8; i++) buf[i] = TWAI.read();
+    if (twai_receive(&rx, pdMS_TO_TICKS(100)) == ESP_OK) {
+      if (rx.identifier == CAN_ID_CMD && rx.data_length_code == 8) {
         if (xSemaphoreTake(ctrlMutex, pdMS_TO_TICKS(5))) {
-          ctrl.y      = (int16_t)((buf[0] << 8) | buf[1]);
-          ctrl.x      = (int16_t)((buf[2] << 8) | buf[3]);
-          ctrl.speed  = buf[4];
-          ctrl.enable = buf[5];
-          ctrl.mode   = buf[6];
+          ctrl.y=(rx.data[0]<<8)|rx.data[1];
+          ctrl.x=(rx.data[2]<<8)|rx.data[3];
+          ctrl.speed=rx.data[4];
+          ctrl.enable=rx.data[5];
+          ctrl.mode=rx.data[6];
           xSemaphoreGive(ctrlMutex);
         }
         last_rx_time = millis();
       }
-    } else {
-      if (millis() - last_rx_time > 500) {
-        if (xSemaphoreTake(ctrlMutex, pdMS_TO_TICKS(5))) {
-          ctrl.enable = 0;
-          xSemaphoreGive(ctrlMutex);
-        }
+    }
+
+    if (millis() - last_rx_time > 500) {
+      if (xSemaphoreTake(ctrlMutex, pdMS_TO_TICKS(5))) {
+        ctrl.enable = 0;
+        ctrl.x = 0;
+        ctrl.y = 0;
+        xSemaphoreGive(ctrlMutex);
       }
-      vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
 }
 
 /* ================= CONTROL TASK ================= */
 void control_task(void *arg) {
+  int16_t left_pwm=0, right_pwm=0;
+
   while (1) {
     ControlData_t c;
-    if (xSemaphoreTake(ctrlMutex, pdMS_TO_TICKS(5))) {
-      c = ctrl;
-      xSemaphoreGive(ctrlMutex);
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
+    if (!xSemaphoreTake(ctrlMutex,pdMS_TO_TICKS(5))) continue;
+    c=ctrl;
+    xSemaphoreGive(ctrlMutex);
 
     if (!c.enable) {
       stop_all();
-      vTaskDelay(pdMS_TO_TICKS(10));
+      vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
 
-    int16_t left  = (int16_t)(((float)(c.x - c.y) / 100.0f) * MAX_PWM);
-    int16_t right = (int16_t)(((float)(c.x + c.y) / 100.0f) * MAX_PWM);
+    int16_t left_target  = ((c.x - c.y) * MAX_PWM) / 100;
+    int16_t right_target = ((c.x + c.y) * MAX_PWM) / 100;
 
-    left  = constrain(left,  -MAX_PWM, MAX_PWM);
-    right = constrain(right, -MAX_PWM, MAX_PWM);
+    left_pwm  = ramp(left_target, left_pwm);
+    right_pwm = ramp(right_target, right_pwm);
 
-    set_motor(MOTOR1_RPWM, MOTOR1_LPWM,  right);
-    set_motor(MOTOR2_RPWM, MOTOR2_LPWM,  right);
-    set_motor(MOTOR3_RPWM, MOTOR3_LPWM, -left);
-    set_motor(MOTOR4_RPWM, MOTOR4_LPWM, -left);
+    // Right motors normal
+    set_motor(CH_M1_R, CH_M1_L, right_pwm);
+    set_motor(CH_M2_R, CH_M2_L, right_pwm);
 
-    vTaskDelay(pdMS_TO_TICKS(10));
-  }
-}
+    // Left motors reversed mounting
+    set_motor(CH_M3_R, CH_M3_L, -left_pwm);
+    set_motor(CH_M4_R, CH_M4_L, -left_pwm);
 
-/* ================= ACCEL TASK ================= */
-void accel_task(void *arg) {
-  sensors_event_t e;
-  while (1) {
-    if (adxl.getEvent(&e)) {
-      if (xSemaphoreTake(accelMutex, pdMS_TO_TICKS(10))) {
-        ax_ = e.acceleration.x;
-        ay_ = e.acceleration.y;
-        az_ = e.acceleration.z;
-        xSemaphoreGive(accelMutex);
-      }
-    }
-    vTaskDelay(pdMS_TO_TICKS(100));
-  }
-}
-
-/* ================= FEEDBACK TX TASK ================= */
-void can_tx_task(void *arg) {
-  uint32_t lastTx = 0;
-  while (1) {
-    if (millis() - lastTx < 200) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-    uint8_t d[8] = {0};
-    if (xSemaphoreTake(accelMutex, pdMS_TO_TICKS(5))) {
-      int16_t ax = ax_ * 100, ay = ay_ * 100, az = az_ * 100;
-      d[0]=ax>>8; d[1]=ax; d[2]=ay>>8; d[3]=ay; d[4]=az>>8; d[5]=az;
-      xSemaphoreGive(accelMutex);
-    }
-    d[6] = faultStatus;
-    can_send(CAN_ID_FEEDBACK, d);
-    lastTx = millis();
-  }
-}
-
-/* ================= ENCODER TX TASK ================= */
-void encoder_tx_task(void *arg) {
-  while (1) {
-    int32_t m1 = (int32_t)enc_m1.getCount();
-    int32_t m4 = (int32_t)enc_m4.getCount();
-
-    uint8_t d[8];
-    d[0]=(m1>>24)&0xFF; d[1]=(m1>>16)&0xFF; d[2]=(m1>>8)&0xFF; d[3]=m1&0xFF;
-    d[4]=(m4>>24)&0xFF; d[5]=(m4>>16)&0xFF; d[6]=(m4>>8)&0xFF; d[7]=m4&0xFF;
-
-    can_send(CAN_ID_ENCODER, d);
-    vTaskDelay(pdMS_TO_TICKS(50));
-  }
-}
-
-/* ================= FAULT TX TASK ================= */
-void fault_tx_task(void *arg) {
-  uint8_t d[8] = {0};
-  while (1) {
-    d[0] = faultStatus;
-    can_send(CAN_ID_FAULT, d);
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(20));
   }
 }
 
@@ -225,30 +233,25 @@ void fault_tx_task(void *arg) {
 void setup() {
   Serial.begin(115200);
   Wire.begin();
-
   motor_init();
   can_init();
 
-  if (!adxl.begin()) faultStatus |= 0x01;
+  accel_ok = adxl.begin();
+  if (!accel_ok) faultStatus |= 0x01;
 
-  // ESP32Encoder handles PCNT internally
-  ESP32Encoder::useInternalWeakPullResistors = puType::up;
-  enc_m1.attachHalfQuad(M1_ENA, M1_ENB);
-  enc_m4.attachHalfQuad(M4_ENA, M4_ENB);
-  enc_m1.clearCount();
-  enc_m4.clearCount();
+  pcnt_init(PCNT_M1,M1_ENA,M1_ENB);
+  pcnt_init(PCNT_M4,M4_ENA,M4_ENB);
+  pcnt_isr_register(pcnt_isr,NULL,0,NULL);
+  pcnt_intr_enable(PCNT_M1);
+  pcnt_intr_enable(PCNT_M4);
 
-  ctrlMutex  = xSemaphoreCreateMutex();
-  accelMutex = xSemaphoreCreateMutex();
+  ctrlMutex=xSemaphoreCreateMutex();
+  accelMutex=xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(can_rx_task,     "rx",   2048, NULL, 3, NULL, 0);
-  xTaskCreatePinnedToCore(control_task,    "ctrl", 2048, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(accel_task,      "acl",  2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(can_tx_task,     "tx",   2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(fault_tx_task,   "flt",  1024, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(encoder_tx_task, "enc",  2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(can_rx_task,"rx",2048,NULL,3,NULL,0);
+  xTaskCreatePinnedToCore(control_task,"ctrl",2048,NULL,3,NULL,1);
 
-  Serial.println("[BOOT] Ready");
+  Serial.println("Motor ECU READY");
 }
 
-void loop() { vTaskDelete(NULL); }
+void loop(){ vTaskDelete(NULL); }
