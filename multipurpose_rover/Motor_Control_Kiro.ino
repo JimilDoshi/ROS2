@@ -159,7 +159,7 @@ void can_rx_task(void *arg) {
   twai_message_t rx;
   while (1) {
     if (twai_receive(&rx, pdMS_TO_TICKS(100)) == ESP_OK) {
-      if (rx.identifier == CAN_ID_CMD && rx.can_dlc == 8) {
+      if (rx.identifier == CAN_ID_CMD && rx.data_length_code == 8) {
         if (xSemaphoreTake(ctrlMutex, pdMS_TO_TICKS(5))) {
           ctrl.y      = (int16_t)((rx.data[0] << 8) | rx.data[1]);
           ctrl.x      = (int16_t)((rx.data[2] << 8) | rx.data[3]);
