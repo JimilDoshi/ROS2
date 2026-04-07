@@ -81,15 +81,9 @@ private:
             if (n < (ssize_t)sizeof(frame)) continue;
 
             if (frame.can_id == CAN_ID_ENCODER && frame.can_dlc == 8) {
-                int32_t m1 = ((int32_t)frame.data[0] << 24) |
-                             ((int32_t)frame.data[1] << 16) |
-                             ((int32_t)frame.data[2] <<  8) |
-                              (int32_t)frame.data[3];
-
-                int32_t m4 = ((int32_t)frame.data[4] << 24) |
-                             ((int32_t)frame.data[5] << 16) |
-                             ((int32_t)frame.data[6] <<  8) |
-                              (int32_t)frame.data[7];
+                // ECU sends int16 per encoder (2 bytes each)
+                int32_t m1 = (int32_t)(int16_t)((frame.data[0] << 8) | frame.data[1]);
+                int32_t m4 = (int32_t)(int16_t)((frame.data[2] << 8) | frame.data[3]);
 
                 std_msgs::msg::Int32MultiArray msg;
                 msg.data = {m1, m4};
