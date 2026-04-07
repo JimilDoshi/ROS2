@@ -32,8 +32,8 @@ using namespace std::chrono_literals;
 // Ticks per rev = 70
 // Dist per tick = 0.2513 / 70 = 0.003590m
 // Ticks for 1m  = 1 / 0.003590 ≈ 279 ticks
-constexpr double WHEEL_RADIUS  = 0.04;   // 8cm diameter → 4cm radius
-constexpr double WHEEL_BASE    = 0.30;   // metres — measure left to right wheel centre
+constexpr double WHEEL_RADIUS  = 0.065;   // 8cm diameter → 4cm radius
+constexpr double WHEEL_BASE    = 0.32;   // metres — measure left to right wheel centre
 constexpr double TICKS_PER_REV = 70.0;  // ticks per full wheel revolution
 
 constexpr double DIST_PER_TICK = (2.0 * M_PI * WHEEL_RADIUS) / TICKS_PER_REV;
@@ -171,9 +171,9 @@ private:
         laser_tf.child_frame_id  = "laser";
 
         // Adjust these offsets to match your RPLIDAR mounting position
-        laser_tf.transform.translation.x = 0.27;   // metres forward from base_link
+        laser_tf.transform.translation.x = 0.32;   // metres forward from base_link
         laser_tf.transform.translation.y = 0.0;   // metres left from base_link
-        laser_tf.transform.translation.z = 0.15;   // metres up from base_link
+        laser_tf.transform.translation.z = 0.16;   // metres up from base_link
 
         // No rotation — lidar faces forward same as robot
         laser_tf.transform.rotation.x = 0.0;
