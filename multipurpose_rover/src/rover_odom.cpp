@@ -15,6 +15,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "tf2_ros/transform_broadcaster.h"
@@ -50,6 +51,11 @@ public:
             std::bind(&RoverOdom::encoderCallback, this, std::placeholders::_1)
         );
 
+        imu_sub_ = this->create_subscription<std_msgs::msg::Float32MultiArray>(
+            "imu_raw", 10,
+            std::bind(&RoverOdom::imuCallback, this, std::placeholders::_1)
+        );
+
         odom_pub_ = this->create_publisher<nav_msgs::msg::Odometry>("odom", 10);
         debug_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("odom_debug", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
@@ -60,15 +66,26 @@ public:
         publishLaserTF();
 
         // Publish odom→base_link TF at 20Hz regardless of encoder data
-        // This ensures slam_toolbox always has a valid TF even when rover is stationary
         tf_timer_ = this->create_wall_timer(
             50ms, std::bind(&RoverOdom::publishTF, this)
+        );
+
+        // Republish laser TF at 1Hz to keep it fresh in TF buffer
+        laser_tf_timer_ = this->create_wall_timer(
+            1000ms, std::bind(&RoverOdom::publishLaserTF, this)
         );
 
         RCLCPP_INFO(this->get_logger(), "rover_odom ready");
     }
 
 private:
+    void imuCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg) {
+        if (msg->data.size() < 3) return;
+        imu_ax_ = msg->data[0];
+        imu_ay_ = msg->data[1];
+        imu_az_ = msg->data[2];
+    }
+
     void encoderCallback(const std_msgs::msg::Int32MultiArray::SharedPtr msg) {
         if (msg->data.size() < 2) return;
 
@@ -104,8 +121,28 @@ private:
         double dist_left  = d_left  * DIST_PER_TICK;
 
         // Differential drive odometry
-        double dist   = (dist_right + dist_left) / 2.0;
-        double d_theta = (dist_right - dist_left) / WHEEL_BASE;
+        double dist    = (dist_right + dist_left) / 2.0;
+        double d_theta_enc = (dist_right - dist_left) / WHEEL_BASE;
+
+        // Complementary filter — validate rotation using ADXL lateral acceleration
+        // During a real turn, lateral acceleration (ay) should be non-zero
+        // If encoder says rotating but ay ≈ 0 → likely encoder noise → trust less
+        // Threshold: 0.3 m/s² lateral accel = real rotation
+        constexpr double ACCEL_THRESHOLD = 0.3;
+        constexpr double ENCODER_TRUST   = 0.85;  // weight for encoder when validated
+        constexpr double ENCODER_TRUST_LOW = 0.2; // weight when no lateral accel detected
+
+        double lateral_accel = std::abs(imu_ay_);
+        double trust = (lateral_accel > ACCEL_THRESHOLD) ? ENCODER_TRUST : ENCODER_TRUST_LOW;
+
+        // Only apply reduced trust when encoder shows significant rotation
+        // Small d_theta (straight driving) always trusted fully
+        double d_theta;
+        if (std::abs(d_theta_enc) < 0.01) {
+            d_theta = d_theta_enc;  // straight — trust encoder fully
+        } else {
+            d_theta = d_theta_enc * trust;  // turning — validate with IMU
+        }
 
         // Update pose
         theta_ += d_theta;
@@ -170,28 +207,29 @@ private:
         laser_tf.header.frame_id = "base_link";
         laser_tf.child_frame_id  = "laser";
 
-        // Adjust these offsets to match your RPLIDAR mounting position
-        laser_tf.transform.translation.x = 0.32;   // metres forward from base_link
-        laser_tf.transform.translation.y = 0.0;   // metres left from base_link
-        laser_tf.transform.translation.z = 0.16;   // metres up from base_link
-
-        // No rotation — lidar faces forward same as robot
+        laser_tf.transform.translation.x = 0.32;
+        laser_tf.transform.translation.y = 0.0;
+        laser_tf.transform.translation.z = 0.16;
         laser_tf.transform.rotation.x = 0.0;
         laser_tf.transform.rotation.y = 0.0;
         laser_tf.transform.rotation.z = 0.0;
         laser_tf.transform.rotation.w = 1.0;
 
-        static_tf_broadcaster_->sendTransform(laser_tf);
+        // Use dynamic broadcaster with fresh timestamp — avoids extrapolation errors
+        tf_broadcaster_->sendTransform(laser_tf);
     }
 
     rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32MultiArray>::SharedPtr imu_sub_;
     rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr debug_pub_;
     rclcpp::TimerBase::SharedPtr tf_timer_;
+    rclcpp::TimerBase::SharedPtr laser_tf_timer_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
     std::unique_ptr<tf2_ros::StaticTransformBroadcaster> static_tf_broadcaster_;
 
     double x_, y_, theta_;
+    float imu_ax_ = 0.0f, imu_ay_ = 0.0f, imu_az_ = 0.0f;
     int32_t last_ticks_right_, last_ticks_left_;
     rclcpp::Time last_time_;
     bool initialized_;

@@ -10,6 +10,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -22,6 +23,7 @@
 #include <atomic>
 
 #define CAN_ID_ENCODER  0x201
+#define CAN_ID_FEEDBACK 0x200
 #define CAN_INTERFACE   "can0"
 
 class RoverCANReceiver : public rclcpp::Node {
@@ -30,6 +32,9 @@ public:
 
         encoder_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>(
             "encoder_raw", 10
+        );
+        imu_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
+            "imu_raw", 10
         );
 
         if (!initCAN()) {
@@ -89,10 +94,22 @@ private:
                 msg.data = {m1, m4};
                 encoder_pub_->publish(msg);
             }
+
+            if (frame.can_id == CAN_ID_FEEDBACK && frame.can_dlc == 8) {
+                // ax, ay, az packed as int16 × 100
+                float ax = (int16_t)((frame.data[0] << 8) | frame.data[1]) / 100.0f;
+                float ay = (int16_t)((frame.data[2] << 8) | frame.data[3]) / 100.0f;
+                float az = (int16_t)((frame.data[4] << 8) | frame.data[5]) / 100.0f;
+
+                std_msgs::msg::Float32MultiArray imu_msg;
+                imu_msg.data = {ax, ay, az};
+                imu_pub_->publish(imu_msg);
+            }
         }
     }
 
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr encoder_pub_;
+    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr imu_pub_;
     std::thread can_thread_;
     int can_fd_;
     std::atomic<bool> running_;
