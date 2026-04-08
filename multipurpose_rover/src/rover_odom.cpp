@@ -18,7 +18,7 @@ using namespace std::chrono_literals;
 
 constexpr double WHEEL_RADIUS  = 0.065;
 constexpr double WHEEL_BASE    = 0.32;
-constexpr double TICKS_PER_REV = 70.0;
+constexpr double TICKS_PER_REV = 140.0;  // 70 physical ticks × 2 (half-quad encoding counts both edges)
 constexpr double DIST_PER_TICK = (2.0 * M_PI * WHEEL_RADIUS) / TICKS_PER_REV;
 
 class RoverOdom : public rclcpp::Node {
