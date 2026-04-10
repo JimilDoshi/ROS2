@@ -60,7 +60,21 @@ def generate_launch_description():
                 'angle_compensate': True,
                 'scan_mode':      'Standard',
             }],
-            remappings=[],
+        ),
+
+        # Raspberry Pi Camera v2
+        Node(
+            package='v4l2_camera',
+            executable='v4l2_camera_node',
+            name='camera',
+            output='screen',
+            parameters=[{
+                'video_device':  '/dev/video0',
+                'image_width':   640,
+                'image_height':  480,
+                'framerate':     15.0,
+                'pixel_format':  'YUYV',
+            }]
         ),
 
     ])
