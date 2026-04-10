@@ -9,6 +9,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(tf2 REQUIRED)
@@ -34,9 +35,9 @@ add_executable(rover_can_driver src/rover_can_driver.cpp)
 ament_target_dependencies(rover_can_driver rclcpp std_msgs)
 target_link_libraries(rover_can_driver ${cpp_typesupport_target})
 
-# CAN receiver — reads raw CAN frames and publishes encoder data
+# CAN receiver — reads raw CAN frames and publishes encoder + IMU data
 add_executable(rover_can_receiver src/rover_can_receiver.cpp)
-ament_target_dependencies(rover_can_receiver rclcpp std_msgs)
+ament_target_dependencies(rover_can_receiver rclcpp std_msgs sensor_msgs)
 
 # Odometry — computes and publishes /odom and /tf from encoder data
 add_executable(rover_odom src/rover_odom.cpp)

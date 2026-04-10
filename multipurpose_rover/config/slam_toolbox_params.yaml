@@ -16,6 +16,10 @@ slam_toolbox:
     transform_timeout: 0.5
     tf_buffer_duration: 30.0
 
+    # Message filter queue — increase to prevent dropped scans
+    message_filter_queue_size: 100
+    scan_queue_size: 100
+
     # Scan matching
     use_scan_matching: true
     minimum_score: 0.3

@@ -1,16 +1,13 @@
 /************************************************************
  * rover_can_receiver.cpp
- * Reads CAN frames from can0 in a dedicated thread (blocking)
- * and publishes encoder data to /encoder_raw at consistent rate.
- *
- * CAN ID 0x201 → /encoder_raw (Int32MultiArray)
- *   data[0] = M1 ticks (rear right, int32)
- *   data[1] = M4 ticks (rear left,  int32)
+ * Reads CAN frames from can0 and publishes:
+ *   CAN 0x201 → /encoder_raw  (Int32MultiArray)
+ *   CAN 0x200 → /imu/data_raw (sensor_msgs/Imu) for EKF
  ************************************************************/
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
-#include "std_msgs/msg/float32_multi_array.hpp"
+#include "sensor_msgs/msg/imu.hpp"
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
@@ -33,8 +30,8 @@ public:
         encoder_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>(
             "encoder_raw", 10
         );
-        imu_pub_ = this->create_publisher<std_msgs::msg::Float32MultiArray>(
-            "imu_raw", 10
+        imu_pub_ = this->create_publisher<sensor_msgs::msg::Imu>(
+            "imu/data_raw", 10
         );
 
         if (!initCAN()) {
@@ -42,18 +39,13 @@ public:
             return;
         }
 
-        // Dedicated blocking read thread — never misses a frame
         can_thread_ = std::thread(&RoverCANReceiver::canReadLoop, this);
-
         RCLCPP_INFO(this->get_logger(), "rover_can_receiver ready on %s", CAN_INTERFACE);
     }
 
     ~RoverCANReceiver() {
         running_ = false;
-        if (can_fd_ >= 0) {
-            shutdown(can_fd_, SHUT_RDWR);
-            close(can_fd_);
-        }
+        if (can_fd_ >= 0) { shutdown(can_fd_, SHUT_RDWR); close(can_fd_); }
         if (can_thread_.joinable()) can_thread_.join();
     }
 
@@ -81,35 +73,53 @@ private:
     void canReadLoop() {
         struct can_frame frame;
         while (running_) {
-            // Blocking read — wakes immediately when a frame arrives
             ssize_t n = read(can_fd_, &frame, sizeof(frame));
             if (n < (ssize_t)sizeof(frame)) continue;
 
             if (frame.can_id == CAN_ID_ENCODER && frame.can_dlc == 8) {
-                // ECU sends int16 per encoder (2 bytes each)
                 int32_t m1 = (int32_t)(int16_t)((frame.data[0] << 8) | frame.data[1]);
                 int32_t m4 = (int32_t)(int16_t)((frame.data[2] << 8) | frame.data[3]);
-
                 std_msgs::msg::Int32MultiArray msg;
                 msg.data = {m1, m4};
                 encoder_pub_->publish(msg);
             }
 
             if (frame.can_id == CAN_ID_FEEDBACK && frame.can_dlc == 8) {
-                // ax, ay, az packed as int16 × 100
                 float ax = (int16_t)((frame.data[0] << 8) | frame.data[1]) / 100.0f;
                 float ay = (int16_t)((frame.data[2] << 8) | frame.data[3]) / 100.0f;
                 float az = (int16_t)((frame.data[4] << 8) | frame.data[5]) / 100.0f;
 
-                std_msgs::msg::Float32MultiArray imu_msg;
-                imu_msg.data = {ax, ay, az};
-                imu_pub_->publish(imu_msg);
+                sensor_msgs::msg::Imu imu;
+                imu.header.stamp    = this->now();
+                imu.header.frame_id = "base_link";
+
+                // ADXL345 has no gyro — set angular velocity to 0 with high covariance
+                imu.angular_velocity.x = 0.0;
+                imu.angular_velocity.y = 0.0;
+                imu.angular_velocity.z = 0.0;
+                imu.angular_velocity_covariance[0] = 9999.0;
+                imu.angular_velocity_covariance[4] = 9999.0;
+                imu.angular_velocity_covariance[8] = 9999.0;
+
+                // Linear acceleration from ADXL345
+                imu.linear_acceleration.x = ax;
+                imu.linear_acceleration.y = ay;
+                imu.linear_acceleration.z = az;
+                // ADXL345 noise ~0.04 m/s² RMS
+                imu.linear_acceleration_covariance[0] = 0.04;
+                imu.linear_acceleration_covariance[4] = 0.04;
+                imu.linear_acceleration_covariance[8] = 0.04;
+
+                // No orientation from accelerometer alone — mark as unknown
+                imu.orientation_covariance[0] = -1.0;
+
+                imu_pub_->publish(imu);
             }
         }
     }
 
     rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr encoder_pub_;
-    rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr imu_pub_;
+    rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_;
     std::thread can_thread_;
     int can_fd_;
     std::atomic<bool> running_;

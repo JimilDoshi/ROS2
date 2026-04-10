@@ -190,19 +190,13 @@ void accel_task(void *arg) {
         xSemaphoreGive(accelMutex);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(100));
+    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz — matches encoder rate
   }
 }
 
 /* ================= CAN TX TASK ================= */
 void can_tx_task(void *arg) {
-  uint32_t lastTx = 0;
   while(1) {
-    if(millis() - lastTx < 200) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
-
     if(xSemaphoreTake(accelMutex, pdMS_TO_TICKS(5))) {
       uint8_t tx_data[8];
       int16_t ax = accel.ax * 100;
@@ -217,8 +211,8 @@ void can_tx_task(void *arg) {
 
       can_send(CAN_ID_FEEDBACK, tx_data);
       xSemaphoreGive(accelMutex);
-      lastTx = millis();
     }
+    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz
   }
 }
 

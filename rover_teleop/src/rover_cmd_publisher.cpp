@@ -28,7 +28,7 @@ struct KeyState {
     std::atomic<bool> right{false};
     std::atomic<bool> quit{false};
     std::atomic<int>  mode{1};
-    std::atomic<int>  speed{50};
+    std::atomic<int>  speed{80};
 };
 
 // Find the keyboard event device automatically
@@ -115,7 +115,7 @@ public:
         auto qos   = rclcpp::QoS(1).best_effort();
         publisher_ = this->create_publisher<RoverCmd>("rover_cmd", qos);
         timer_     = this->create_wall_timer(
-            20ms, std::bind(&RoverCmdPublisher::timerCallback, this));
+            10ms, std::bind(&RoverCmdPublisher::timerCallback, this));
     }
 
     bool running() { return !keys_.quit; }
