@@ -72,6 +72,11 @@ uint32_t last_rx_time = 0;
 Adafruit_ADXL345_Unified adxl(12345);
 uint8_t faultStatus = 0;
 
+// Low-pass filter state for ADXL — alpha=0.2 keeps signal smooth
+// lower alpha = more smoothing, higher = more responsive
+#define LPF_ALPHA 0.2f
+float lpf_ax = 0.0f, lpf_ay = 0.0f, lpf_az = 0.0f;
+
 /* ================= MOTOR FUNCTIONS ================= */
 void motor_init() {
   ledcAttach(MOTOR1_RPWM, PWM_FREQ, PWM_RES);
@@ -182,15 +187,20 @@ void accel_task(void *arg) {
     if(!adxl.getEvent(&e)) {
       faultStatus |= (1 << FAULT_ADXL_ERROR);
     } else {
+      // Low-pass filter: smoothed = alpha * raw + (1-alpha) * prev
+      lpf_ax = LPF_ALPHA * e.acceleration.x + (1.0f - LPF_ALPHA) * lpf_ax;
+      lpf_ay = LPF_ALPHA * e.acceleration.y + (1.0f - LPF_ALPHA) * lpf_ay;
+      lpf_az = LPF_ALPHA * e.acceleration.z + (1.0f - LPF_ALPHA) * lpf_az;
+
       if(xSemaphoreTake(accelMutex, pdMS_TO_TICKS(10))) {
-        accel.ax = e.acceleration.x;
-        accel.ay = e.acceleration.y;
-        accel.az = e.acceleration.z;
+        accel.ax = lpf_ax;
+        accel.ay = lpf_ay;
+        accel.az = lpf_az;
         faultStatus &= ~(1 << FAULT_ADXL_ERROR);
         xSemaphoreGive(accelMutex);
       }
     }
-    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz — matches encoder rate
+    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz
   }
 }
 

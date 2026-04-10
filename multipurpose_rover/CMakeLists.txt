@@ -37,7 +37,7 @@ target_link_libraries(rover_can_driver ${cpp_typesupport_target})
 
 # CAN receiver — reads raw CAN frames and publishes encoder + IMU data
 add_executable(rover_can_receiver src/rover_can_receiver.cpp)
-ament_target_dependencies(rover_can_receiver rclcpp std_msgs sensor_msgs)
+ament_target_dependencies(rover_can_receiver rclcpp std_msgs sensor_msgs nav_msgs)
 
 # Odometry — computes and publishes /odom and /tf from encoder data
 add_executable(rover_odom src/rover_odom.cpp)
