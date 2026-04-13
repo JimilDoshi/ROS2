@@ -62,16 +62,17 @@ def generate_launch_description():
             }],
         ),
 
-        # Raspberry Pi Camera v2 — uses libcamera via camera_ros
+        # Raspberry Pi Camera v2 on Ubuntu — uses bcm2835-isp pipeline
         Node(
-            package='camera_ros',
-            executable='camera_node',
+            package='v4l2_camera',
+            executable='v4l2_camera_node',
             name='camera',
             output='screen',
             parameters=[{
-                'width':     640,
-                'height':    480,
-                'framerate': 15.0,
+                'video_device':  '/dev/video13',  # bcm2835-isp output on Ubuntu
+                'image_width':   640,
+                'image_height':  480,
+                'pixel_format':  'YUYV',
             }]
         ),
 

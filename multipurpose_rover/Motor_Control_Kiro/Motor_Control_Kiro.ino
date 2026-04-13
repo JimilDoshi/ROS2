@@ -1,6 +1,13 @@
 /************************************************************
- * ESP32 Motor Driver ECU + ADXL345 (Lightweight)
- * Eco/Normal/Sport Mode + Fault Detection
+ * ESP32 Motor Driver ECU
+ * MPU6050 IMU (accel + gyro) + Encoders + CAN
+ *
+ * CAN frames sent:
+ *   0x101 ← received cmd (x, y, speed, enable, mode)
+ *   0x200 → IMU accel  (ax, ay, az as int16 × 100)
+ *   0x201 → encoders   (m1, m4 as int16)
+ *   0x202 → IMU gyro   (gx, gy, gz as int16 × 100, rad/s)
+ *   0x300 → fault status
  ************************************************************/
 
 #include <Arduino.h>
@@ -8,7 +15,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
-#include <Adafruit_ADXL345_U.h>
+#include <MPU6050_light.h>
 #include "driver/twai.h"
 #include "driver/pcnt.h"
 
@@ -41,43 +48,42 @@
 #define CAN_TX GPIO_NUM_5
 #define CAN_RX GPIO_NUM_4
 
-#define CAN_ID_RECEIVER_DATA 0x101
-#define CAN_ID_FEEDBACK      0x200
-#define CAN_ID_ENCODER       0x201
-#define CAN_ID_FAULT         0x300
+#define CAN_ID_CMD      0x101
+#define CAN_ID_ACCEL    0x200   // ax, ay, az
+#define CAN_ID_ENCODER  0x201   // m1, m4 ticks
+#define CAN_ID_GYRO     0x202   // gx, gy, gz
+#define CAN_ID_FAULT    0x300
 
 /* ================= FAULT FLAGS ================= */
-#define FAULT_CAN_RX_TIMEOUT   0
-#define FAULT_ADXL_ERROR       1
-#define FAULT_MOTOR_FAULT      2
+#define FAULT_CAN_TIMEOUT  0
+#define FAULT_IMU_ERROR    1
 
 /* ================= STRUCTS ================= */
 typedef struct {
-  int16_t x;
-  int16_t y;
-  uint8_t speed;
-  uint8_t enable;
-  uint8_t mode;
+  int16_t x, y;
+  uint8_t speed, enable, mode;
 } ControlData_t;
 
 typedef struct {
   float ax, ay, az;
-} AccelData_t;
+  float gx, gy, gz;
+} ImuData_t;
 
 /* ================= GLOBALS ================= */
-ControlData_t control = {0};
-AccelData_t accel = {0};
-SemaphoreHandle_t accelMutex;
+ControlData_t ctrl = {0};
+ImuData_t imu_data = {0};
+SemaphoreHandle_t imuMutex;
 uint32_t last_rx_time = 0;
-Adafruit_ADXL345_Unified adxl(12345);
 uint8_t faultStatus = 0;
 
-// Low-pass filter state for ADXL — alpha=0.2 keeps signal smooth
-// lower alpha = more smoothing, higher = more responsive
-#define LPF_ALPHA 0.2f
-float lpf_ax = 0.0f, lpf_ay = 0.0f, lpf_az = 0.0f;
+MPU6050 mpu(Wire);
 
-/* ================= MOTOR FUNCTIONS ================= */
+// Low-pass filter alpha — 0.2 = smooth, 0.5 = responsive
+#define LPF_A 0.2f
+float lpf_ax=0, lpf_ay=0, lpf_az=0;
+float lpf_gx=0, lpf_gy=0, lpf_gz=0;
+
+/* ================= MOTOR ================= */
 void motor_init() {
   ledcAttach(MOTOR1_RPWM, PWM_FREQ, PWM_RES);
   ledcAttach(MOTOR1_LPWM, PWM_FREQ, PWM_RES);
@@ -95,23 +101,22 @@ void set_motor(uint8_t motor, int8_t dir, uint8_t pwm) {
   else if(motor==2){r=MOTOR2_RPWM;l=MOTOR2_LPWM;}
   else if(motor==3){r=MOTOR3_RPWM;l=MOTOR3_LPWM;}
   else{r=MOTOR4_RPWM;l=MOTOR4_LPWM;}
-
   if(dir>0){ledcWrite(r,pwm);ledcWrite(l,0);}
   else if(dir<0){ledcWrite(r,0);ledcWrite(l,pwm);}
   else{ledcWrite(r,0);ledcWrite(l,0);}
 }
 
-/* ================= CAN FUNCTIONS ================= */
-void can_send(uint32_t id, uint8_t *data) {
-  twai_message_t tx = {.identifier = id, .data_length_code = 8};
-  memcpy(tx.data, data, 8);
-  twai_transmit(&tx, 0);
+/* ================= CAN ================= */
+void can_send(uint32_t id, uint8_t *data, uint8_t len=8) {
+  twai_message_t tx = {.identifier = id, .data_length_code = len};
+  memcpy(tx.data, data, len);
+  twai_transmit(&tx, pdMS_TO_TICKS(5));
 }
 
 void can_init() {
   twai_general_config_t g = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX, CAN_RX, TWAI_MODE_NORMAL);
-  twai_timing_config_t t = TWAI_TIMING_CONFIG_500KBITS();
-  twai_filter_config_t f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+  twai_timing_config_t  t = TWAI_TIMING_CONFIG_500KBITS();
+  twai_filter_config_t  f = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   twai_driver_install(&g, &t, &f);
   twai_start();
 }
@@ -121,19 +126,18 @@ void can_rx_task(void *arg) {
   twai_message_t rx;
   while(1) {
     if(twai_receive(&rx, pdMS_TO_TICKS(100)) == ESP_OK) {
-      if(rx.identifier == CAN_ID_RECEIVER_DATA && rx.data_length_code == 8) {
-        control.y = (int16_t)((rx.data[0]<<8)|rx.data[1]);
-        control.x = (int16_t)((rx.data[2]<<8)|rx.data[3]);
-        control.speed = rx.data[4];
-        control.enable = rx.data[5];
-        control.mode = rx.data[6];
+      if(rx.identifier == CAN_ID_CMD && rx.data_length_code == 8) {
+        ctrl.y      = (int16_t)((rx.data[0]<<8)|rx.data[1]);
+        ctrl.x      = (int16_t)((rx.data[2]<<8)|rx.data[3]);
+        ctrl.speed  = rx.data[4];
+        ctrl.enable = rx.data[5];
+        ctrl.mode   = rx.data[6];
         last_rx_time = millis();
-        faultStatus &= ~(1 << FAULT_CAN_RX_TIMEOUT);
+        faultStatus &= ~(1 << FAULT_CAN_TIMEOUT);
       }
     } else {
-      if(millis() - last_rx_time > 500) {
-        faultStatus |= (1 << FAULT_CAN_RX_TIMEOUT);
-      }
+      if(millis() - last_rx_time > 500)
+        faultStatus |= (1 << FAULT_CAN_TIMEOUT);
     }
   }
 }
@@ -141,114 +145,113 @@ void can_rx_task(void *arg) {
 /* ================= CONTROL TASK ================= */
 void control_task(void *arg) {
   while(1) {
-    if(millis() - last_rx_time > 500) {
-      control.enable = 0;
-      faultStatus |= (1 << FAULT_CAN_RX_TIMEOUT);
-    }
+    if(millis() - last_rx_time > 500) ctrl.enable = 0;
 
-    if(!control.enable) {
-      for(int i=1; i<=4; i++) set_motor(i, 0, 0);
+    if(!ctrl.enable) {
+      for(int i=1;i<=4;i++) set_motor(i,0,0);
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
 
-    float mode_scale = (control.mode==0) ? 0.3f : (control.mode==1) ? 0.6f : 1.0f;
-    float throttle = (control.x / 100.0f) * control.speed * mode_scale;
-    float turn = -(control.y / 100.0f) * control.speed * mode_scale;
+    float mode_scale = (ctrl.mode==0)?0.3f:(ctrl.mode==1)?0.6f:1.0f;
+    float throttle = (ctrl.x/100.0f)*ctrl.speed*mode_scale;
+    float turn     = -(ctrl.y/100.0f)*ctrl.speed*mode_scale;
 
-    int16_t left = (int16_t)constrain(throttle + turn, -100, 100);
-    int16_t right = (int16_t)constrain(throttle - turn, -100, 100);
+    int16_t left  = (int16_t)constrain(throttle+turn, -100, 100);
+    int16_t right = (int16_t)constrain(throttle-turn, -100, 100);
 
-    left = (int16_t)((left / 100.0f) * MAX_PWM);
-    right = (int16_t)((right / 100.0f) * MAX_PWM);
+    left  = (int16_t)((left /100.0f)*MAX_PWM);
+    right = (int16_t)((right/100.0f)*MAX_PWM);
 
-    if(left > 0) left = (left < MIN_PWM) ? MIN_PWM : left;
-    if(left < 0) left = (left > -MIN_PWM) ? -MIN_PWM : left;
-    if(right > 0) right = (right < MIN_PWM) ? MIN_PWM : right;
-    if(right < 0) right = (right > -MIN_PWM) ? -MIN_PWM : right;
+    if(left >0) left  = (left  < MIN_PWM)? MIN_PWM:left;
+    if(left <0) left  = (left  >-MIN_PWM)?-MIN_PWM:left;
+    if(right>0) right = (right < MIN_PWM)? MIN_PWM:right;
+    if(right<0) right = (right >-MIN_PWM)?-MIN_PWM:right;
+    if(abs(left) <10) left =0;
+    if(abs(right)<10) right=0;
 
-    if(abs(left) < 10) left = 0;
-    if(abs(right) < 10) right = 0;
-
-    // M1=RR, M2=FR (right side), M3=FL, M4=RL (left side)
-    set_motor(1, left>=0?1:-1,  abs(left));   // RR - right side
-    set_motor(2, right>=0?1:-1, abs(right));  // FR - right side
-    set_motor(3, left>=0?1:-1,  abs(left));   // FL - left side
-    set_motor(4, right>=0?1:-1, abs(right));  // RL - left side
+    set_motor(1, left >=0?1:-1, abs(left));
+    set_motor(2, right>=0?1:-1, abs(right));
+    set_motor(3, left >=0?1:-1, abs(left));
+    set_motor(4, right>=0?1:-1, abs(right));
 
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 
-/* ================= ACCEL TASK ================= */
-void accel_task(void *arg) {
-  sensors_event_t e;
+/* ================= IMU TASK ================= */
+void imu_task(void *arg) {
   while(1) {
-    if(!adxl.getEvent(&e)) {
-      faultStatus |= (1 << FAULT_ADXL_ERROR);
-    } else {
-      // Low-pass filter: smoothed = alpha * raw + (1-alpha) * prev
-      lpf_ax = LPF_ALPHA * e.acceleration.x + (1.0f - LPF_ALPHA) * lpf_ax;
-      lpf_ay = LPF_ALPHA * e.acceleration.y + (1.0f - LPF_ALPHA) * lpf_ay;
-      lpf_az = LPF_ALPHA * e.acceleration.z + (1.0f - LPF_ALPHA) * lpf_az;
+    mpu.update();
 
-      if(xSemaphoreTake(accelMutex, pdMS_TO_TICKS(10))) {
-        accel.ax = lpf_ax;
-        accel.ay = lpf_ay;
-        accel.az = lpf_az;
-        faultStatus &= ~(1 << FAULT_ADXL_ERROR);
-        xSemaphoreGive(accelMutex);
-      }
+    // Low-pass filter on all 6 axes
+    lpf_ax = LPF_A*mpu.getAccX() + (1-LPF_A)*lpf_ax;
+    lpf_ay = LPF_A*mpu.getAccY() + (1-LPF_A)*lpf_ay;
+    lpf_az = LPF_A*mpu.getAccZ() + (1-LPF_A)*lpf_az;
+    lpf_gx = LPF_A*mpu.getGyroX() + (1-LPF_A)*lpf_gx;
+    lpf_gy = LPF_A*mpu.getGyroY() + (1-LPF_A)*lpf_gy;
+    lpf_gz = LPF_A*mpu.getGyroZ() + (1-LPF_A)*lpf_gz;
+
+    if(xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5))) {
+      imu_data.ax = lpf_ax; imu_data.ay = lpf_ay; imu_data.az = lpf_az;
+      imu_data.gx = lpf_gx; imu_data.gy = lpf_gy; imu_data.gz = lpf_gz;
+      xSemaphoreGive(imuMutex);
     }
-    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz
+    vTaskDelay(pdMS_TO_TICKS(10));  // 100Hz
   }
 }
 
-/* ================= CAN TX TASK ================= */
-void can_tx_task(void *arg) {
+/* ================= IMU TX TASK ================= */
+// Sends accel on 0x200 and gyro on 0x202 at 50Hz
+void imu_tx_task(void *arg) {
   while(1) {
-    if(xSemaphoreTake(accelMutex, pdMS_TO_TICKS(5))) {
-      uint8_t tx_data[8];
-      int16_t ax = accel.ax * 100;
-      int16_t ay = accel.ay * 100;
-      int16_t az = accel.az * 100;
+    if(xSemaphoreTake(imuMutex, pdMS_TO_TICKS(5))) {
+      // Accel frame 0x200 — ax, ay, az as int16 × 100 (m/s²)
+      uint8_t accel_data[8] = {0};
+      int16_t ax = imu_data.ax * 100;
+      int16_t ay = imu_data.ay * 100;
+      int16_t az = imu_data.az * 100;
+      accel_data[0]=ax>>8; accel_data[1]=ax;
+      accel_data[2]=ay>>8; accel_data[3]=ay;
+      accel_data[4]=az>>8; accel_data[5]=az;
+      accel_data[6]=ctrl.speed;
+      accel_data[7]=faultStatus;
+      can_send(CAN_ID_ACCEL, accel_data);
 
-      tx_data[0] = ax>>8; tx_data[1] = ax;
-      tx_data[2] = ay>>8; tx_data[3] = ay;
-      tx_data[4] = az>>8; tx_data[5] = az;
-      tx_data[6] = control.speed;
-      tx_data[7] = faultStatus;
+      // Gyro frame 0x202 — gx, gy, gz as int16 × 100 (rad/s)
+      uint8_t gyro_data[8] = {0};
+      int16_t gx = imu_data.gx * 100;
+      int16_t gy = imu_data.gy * 100;
+      int16_t gz = imu_data.gz * 100;
+      gyro_data[0]=gx>>8; gyro_data[1]=gx;
+      gyro_data[2]=gy>>8; gyro_data[3]=gy;
+      gyro_data[4]=gz>>8; gyro_data[5]=gz;
+      can_send(CAN_ID_GYRO, gyro_data);
 
-      can_send(CAN_ID_FEEDBACK, tx_data);
-      xSemaphoreGive(accelMutex);
+      xSemaphoreGive(imuMutex);
     }
-    vTaskDelay(pdMS_TO_TICKS(50));  // 20Hz
+    vTaskDelay(pdMS_TO_TICKS(20));  // 50Hz
   }
 }
 
 /* ================= FAULT TX TASK ================= */
 void fault_tx_task(void *arg) {
-  uint8_t tx_data[8] = {0};
+  uint8_t d[8] = {0};
   while(1) {
-    tx_data[0] = faultStatus;
-    can_send(CAN_ID_FAULT, tx_data);
+    d[0] = faultStatus;
+    can_send(CAN_ID_FAULT, d);
     vTaskDelay(pdMS_TO_TICKS(500));
   }
 }
 
-/* ================= ENCODER FUNCTIONS ================= */
+/* ================= ENCODER INIT ================= */
 void encoder_init(pcnt_unit_t unit, int pin_a, int pin_b) {
   pcnt_config_t cfg = {
-    .pulse_gpio_num = pin_a,
-    .ctrl_gpio_num  = pin_b,
-    .lctrl_mode     = PCNT_MODE_REVERSE,
-    .hctrl_mode     = PCNT_MODE_KEEP,
-    .pos_mode       = PCNT_COUNT_INC,
-    .neg_mode       = PCNT_COUNT_DEC,
-    .counter_h_lim  = 32767,
-    .counter_l_lim  = -32768,
-    .unit           = unit,
-    .channel        = PCNT_CHANNEL_0,
+    .pulse_gpio_num = pin_a, .ctrl_gpio_num = pin_b,
+    .lctrl_mode = PCNT_MODE_REVERSE, .hctrl_mode = PCNT_MODE_KEEP,
+    .pos_mode = PCNT_COUNT_INC, .neg_mode = PCNT_COUNT_DEC,
+    .counter_h_lim = 32767, .counter_l_lim = -32768,
+    .unit = unit, .channel = PCNT_CHANNEL_0,
   };
   pcnt_unit_config(&cfg);
   pcnt_filter_enable(unit);
@@ -261,44 +264,50 @@ void encoder_init(pcnt_unit_t unit, int pin_a, int pin_b) {
 /* ================= ENCODER TX TASK ================= */
 void encoder_tx_task(void *arg) {
   while(1) {
-    int16_t cnt_m1 = 0, cnt_m4 = 0;
-    pcnt_get_counter_value(ENC_M1_UNIT, &cnt_m1);
-    pcnt_get_counter_value(ENC_M4_UNIT, &cnt_m4);
+    int16_t m1=0, m4=0;
+    pcnt_get_counter_value(ENC_M1_UNIT, &m1);
+    pcnt_get_counter_value(ENC_M4_UNIT, &m4);
 
-    uint8_t tx_data[8] = {0};
-    tx_data[0] = (cnt_m1 >> 8) & 0xFF;
-    tx_data[1] =  cnt_m1       & 0xFF;
-    tx_data[2] = (cnt_m4 >> 8) & 0xFF;
-    tx_data[3] =  cnt_m4       & 0xFF;
-
-    can_send(CAN_ID_ENCODER, tx_data);
-    vTaskDelay(pdMS_TO_TICKS(50));
+    uint8_t d[8] = {0};
+    d[0]=(m1>>8)&0xFF; d[1]=m1&0xFF;
+    d[2]=(m4>>8)&0xFF; d[3]=m4&0xFF;
+    can_send(CAN_ID_ENCODER, d);
+    vTaskDelay(pdMS_TO_TICKS(20));  // 50Hz
   }
 }
 
 /* ================= SETUP ================= */
 void setup() {
+  Serial.begin(115200);
   Wire.begin();
+
   motor_init();
   can_init();
 
-  if(!adxl.begin()) {
-    faultStatus |= (1 << FAULT_ADXL_ERROR);
+  // MPU6050 init and calibration
+  byte status = mpu.begin();
+  if(status != 0) {
+    faultStatus |= (1 << FAULT_IMU_ERROR);
+    Serial.println("[IMU] MPU6050 init failed!");
+  } else {
+    Serial.println("[IMU] Calibrating — keep rover still...");
+    mpu.calcOffsets(true, true);  // gyro + accel calibration
+    Serial.println("[IMU] Calibration done");
   }
 
   encoder_init(ENC_M1_UNIT, M1_ENA, M1_ENB);
   encoder_init(ENC_M4_UNIT, M4_ENA, M4_ENB);
 
-  accelMutex = xSemaphoreCreateMutex();
+  imuMutex = xSemaphoreCreateMutex();
 
-  xTaskCreatePinnedToCore(can_rx_task,     "rx",  2048, NULL, 3, NULL, 0);
-  xTaskCreatePinnedToCore(control_task,    "ctrl",2048, NULL, 3, NULL, 1);
-  xTaskCreatePinnedToCore(accel_task,      "acl", 2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(can_tx_task,     "tx",  2048, NULL, 2, NULL, 0);
-  xTaskCreatePinnedToCore(fault_tx_task,   "flt", 1024, NULL, 1, NULL, 0);
-  xTaskCreatePinnedToCore(encoder_tx_task, "enc", 2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(can_rx_task,     "rx",   2048, NULL, 3, NULL, 0);
+  xTaskCreatePinnedToCore(control_task,    "ctrl", 2048, NULL, 3, NULL, 1);
+  xTaskCreatePinnedToCore(imu_task,        "imu",  2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(imu_tx_task,     "itx",  2048, NULL, 2, NULL, 0);
+  xTaskCreatePinnedToCore(fault_tx_task,   "flt",  1024, NULL, 1, NULL, 0);
+  xTaskCreatePinnedToCore(encoder_tx_task, "enc",  2048, NULL, 2, NULL, 0);
+
+  Serial.println("[BOOT] Ready");
 }
 
-void loop() {
-  vTaskDelete(NULL);
-}
+void loop() { vTaskDelete(NULL); }
