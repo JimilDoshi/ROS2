@@ -62,18 +62,4 @@ def generate_launch_description():
             }],
         ),
 
-        # Raspberry Pi Camera v2 on Ubuntu — uses bcm2835-isp pipeline
-        Node(
-            package='v4l2_camera',
-            executable='v4l2_camera_node',
-            name='camera',
-            output='screen',
-            parameters=[{
-                'video_device':  '/dev/video13',  # bcm2835-isp output on Ubuntu
-                'image_width':   640,
-                'image_height':  480,
-                'pixel_format':  'YUYV',
-            }]
-        ),
-
     ])
