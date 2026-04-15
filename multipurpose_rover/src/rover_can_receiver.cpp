@@ -108,10 +108,10 @@ private:
         imu.angular_velocity.x = gx_;
         imu.angular_velocity.y = gy_;
         imu.angular_velocity.z = gz_;
-        // MPU6050 gyro noise ~0.005 rad/s RMS
-        imu.angular_velocity_covariance[0] = 0.005;
-        imu.angular_velocity_covariance[4] = 0.005;
-        imu.angular_velocity_covariance[8] = 0.005;
+        // MPU6050 gyro — tight covariance = EKF trusts this strongly over encoder yaw
+        imu.angular_velocity_covariance[0] = 0.001;
+        imu.angular_velocity_covariance[4] = 0.001;
+        imu.angular_velocity_covariance[8] = 0.001;
 
         imu.linear_acceleration.x = ax_;
         imu.linear_acceleration.y = ay_;

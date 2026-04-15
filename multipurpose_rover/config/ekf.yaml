@@ -10,10 +10,10 @@ ekf_filter_node:
     world_frame: odom
 
     odom0: /odom
-    odom0_config: [true,  true,  false,
-                   false, false, true,
-                   true,  true,  false,
-                   false, false, true,
+    odom0_config: [true,  true,  false,   # x, y position
+                   false, false, false,   # NO yaw from encoder — gyro handles it
+                   true,  true,  false,   # vx, vy velocity
+                   false, false, false,   # NO yaw rate from encoder
                    false, false, false]
     odom0_differential: false
     odom0_relative: false
@@ -23,8 +23,8 @@ ekf_filter_node:
     imu0_config: [false, false, false,
                   false, false, false,
                   false, false, false,
-                  false, false, true,    # use angular velocity z (real gyro from MPU6050)
-                  true,  true,  false]   # use linear acceleration ax, ay
+                  false, false, true,    # yaw rate from gyro ONLY
+                  true,  false, false]   # ax only — forward acceleration
     imu0_differential: false
     imu0_relative: false
     imu0_queue_size: 10

@@ -103,11 +103,11 @@ private:
         odom.pose.pose.orientation.w = q.w();
         odom.twist.twist.linear.x    = dist    / dt;
         odom.twist.twist.angular.z   = d_theta / dt;
-        odom.pose.covariance[0]  = 0.01;
-        odom.pose.covariance[7]  = 0.01;
-        odom.pose.covariance[35] = 0.05;
+        odom.pose.covariance[0]  = 0.01;   // x
+        odom.pose.covariance[7]  = 0.01;   // y
+        odom.pose.covariance[35] = 0.5;    // yaw — high uncertainty, let gyro override
         odom.twist.covariance[0]  = 0.01;
-        odom.twist.covariance[35] = 0.05;
+        odom.twist.covariance[35] = 0.5;   // yaw rate — high uncertainty
 
         odom_pub_->publish(odom);
     }
