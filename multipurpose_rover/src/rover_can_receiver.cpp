@@ -70,9 +70,24 @@ private:
             if (frame.can_id == CAN_ID_ENCODER && frame.can_dlc == 8) {
                 int32_t m1 = (int32_t)(int16_t)((frame.data[0]<<8)|frame.data[1]);
                 int32_t m4 = (int32_t)(int16_t)((frame.data[2]<<8)|frame.data[3]);
-                std_msgs::msg::Int32MultiArray msg;
-                msg.data = {m1, m4};
-                encoder_pub_->publish(msg);
+
+                // Slip detection: if accel shows no forward motion but encoders are
+                // counting, wheels are likely in the air or slipping — freeze odom
+                // ax threshold 0.3 m/s² — below this = no real movement
+                bool real_motion = (std::abs(ax_) > 0.3f) || (std::abs(gz_) > 0.05f);
+
+                if (real_motion) {
+                    std_msgs::msg::Int32MultiArray msg;
+                    msg.data = {m1, m4};
+                    encoder_pub_->publish(msg);
+                } else {
+                    // Publish same ticks as last time to freeze odom position
+                    std_msgs::msg::Int32MultiArray msg;
+                    msg.data = {last_m1_, last_m4_};
+                    encoder_pub_->publish(msg);
+                }
+                last_m1_ = m1;
+                last_m4_ = m4;
             }
 
             if (frame.can_id == CAN_ID_ACCEL && frame.can_dlc == 8) {
@@ -105,13 +120,15 @@ private:
         imu.header.frame_id = "base_link";
 
         // Real gyro from MPU6050 — direct yaw rate, no derivation needed
-        imu.angular_velocity.x = gx_;
-        imu.angular_velocity.y = gy_;
-        imu.angular_velocity.z = gz_;
+        // Dead zone — suppress gyro noise below 0.05 rad/s (stationary drift)
+        constexpr float GYRO_DZ = 0.05f;
+        imu.angular_velocity.x = (std::abs(gx_) > GYRO_DZ) ? gx_ : 0.0f;
+        imu.angular_velocity.y = (std::abs(gy_) > GYRO_DZ) ? gy_ : 0.0f;
+        imu.angular_velocity.z = (std::abs(gz_) > GYRO_DZ) ? gz_ : 0.0f;
         // MPU6050 gyro — tight covariance = EKF trusts this strongly over encoder yaw
-        imu.angular_velocity_covariance[0] = 0.001;
-        imu.angular_velocity_covariance[4] = 0.001;
-        imu.angular_velocity_covariance[8] = 0.001;
+        imu.angular_velocity_covariance[0] = 0.01;
+        imu.angular_velocity_covariance[4] = 0.01;
+        imu.angular_velocity_covariance[8] = 0.01;
 
         imu.linear_acceleration.x = ax_;
         imu.linear_acceleration.y = ay_;
@@ -137,6 +154,7 @@ private:
     float ax_=0, ay_=0, az_=0;
     float gx_=0, gy_=0, gz_=0;
     bool accel_ready_=false, gyro_ready_=false;
+    int32_t last_m1_=0, last_m4_=0;
 };
 
 int main(int argc, char *argv[]) {

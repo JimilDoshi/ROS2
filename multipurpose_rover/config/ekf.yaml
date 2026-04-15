@@ -11,7 +11,7 @@ ekf_filter_node:
 
     odom0: /odom
     odom0_config: [true,  true,  false,   # x, y position
-                   false, false, false,   # NO yaw from encoder — gyro handles it
+                   false, false, false,   # NO yaw from encoder
                    true,  true,  false,   # vx, vy velocity
                    false, false, false,   # NO yaw rate from encoder
                    false, false, false]
@@ -24,7 +24,7 @@ ekf_filter_node:
                   false, false, false,
                   false, false, false,
                   false, false, true,    # yaw rate from gyro ONLY
-                  true,  false, false]   # ax only — forward acceleration
+                  true,  false, false]
     imu0_differential: false
     imu0_relative: false
     imu0_queue_size: 10
