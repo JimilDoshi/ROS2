@@ -279,19 +279,56 @@ void encoder_tx_task(void *arg) {
 /* ================= SETUP ================= */
 void setup() {
   Serial.begin(115200);
-  Wire.begin();
 
   motor_init();
   can_init();
 
-  // MPU6050 init and calibration
+  // Try SDA=21 SCL=22 first, then swap if MPU not found
+  Wire.begin(21, 22);
+  Wire.setClock(100000);
+  delay(500);
+
+  Serial.println("[I2C] Scanning SDA=21 SCL=22...");
+  bool mpu_found = false;
+  for(byte addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if(Wire.endTransmission() == 0) {
+      Serial.printf("[I2C] 0x%02X\n", addr);
+      if(addr == 0x68 || addr == 0x69) mpu_found = true;
+    }
+  }
+
+  if(!mpu_found) {
+    Serial.println("[I2C] Trying SDA=22 SCL=21...");
+    Wire.end();
+    delay(100);
+    Wire.begin(22, 21);
+    Wire.setClock(100000);
+    delay(300);
+    for(byte addr = 1; addr < 127; addr++) {
+      Wire.beginTransmission(addr);
+      if(Wire.endTransmission() == 0) {
+        Serial.printf("[I2C] 0x%02X\n", addr);
+        if(addr == 0x68 || addr == 0x69) mpu_found = true;
+      }
+    }
+  }
+
+  if(!mpu_found) Serial.println("[I2C] MPU6050 not found on bus!");
+
+  // Try 0x68 first (AD0 LOW), then 0x69 (AD0 HIGH)
   byte status = mpu.begin();
   if(status != 0) {
+    Serial.println("[IMU] 0x68 failed, trying 0x69...");
+    status = mpu.begin(0x69);
+  }
+
+  if(status != 0) {
     faultStatus |= (1 << FAULT_IMU_ERROR);
-    Serial.println("[IMU] MPU6050 init failed!");
+    Serial.println("[IMU] MPU6050 init failed on both addresses!");
   } else {
     Serial.println("[IMU] Calibrating — keep rover still...");
-    mpu.calcOffsets(true, true);  // gyro + accel calibration
+    mpu.calcOffsets(true, true);
     Serial.println("[IMU] Calibration done");
   }
 

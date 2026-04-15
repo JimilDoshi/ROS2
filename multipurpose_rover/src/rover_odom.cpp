@@ -37,16 +37,13 @@ public:
         debug_pub_ = this->create_publisher<std_msgs::msg::Int32MultiArray>("odom_debug", 10);
         tf_broadcaster_ = std::make_unique<tf2_ros::TransformBroadcaster>(*this);
 
-        // odom→base_link at 20Hz — always publishing so slam_toolbox never loses the frame
+        // odom→base_link TF now published by EKF node
+        // Keep timer running but only publish laser TF
         tf_timer_ = this->create_wall_timer(
-            50ms, std::bind(&RoverOdom::publishTF, this)
+            50ms, std::bind(&RoverOdom::publishLaserTF, this)
         );
 
-        // base_link→laser at 1Hz with fresh timestamp — avoids extrapolation errors
-        laser_tf_timer_ = this->create_wall_timer(
-            1000ms, std::bind(&RoverOdom::publishLaserTF, this)
-        );
-        publishLaserTF();  // publish once immediately on startup
+        // base_link→laser refreshed by tf_timer above
 
         RCLCPP_INFO(this->get_logger(), "rover_odom ready");
     }
